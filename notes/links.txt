@@ -1,0 +1,8 @@
+https://github.com/eislab-cps/D7065E
+https://github.com/eislab-cps/D7065E/blob/main/course-notes/course-notes1.md
+https://github.com/eislab-cps/D7065E/blob/main/course-notes/course-notes2.md
+https://github.com/eislab-cps/D7065E/blob/main/course-notes/course-notes3.md
+https://github.com/eislab-cps/D7065E/blob/main/course-notes/course-notes4.md
+https://github.com/eislab-cps/D7065E/blob/main/tutorials/buildsim.md
+https://github.com/eislab-cps/D7065E/blob/main/tutorials/diagrams-as-code.md
+https://github.com/eislab-cps/D7065E/blob/main/tutorials/docker-containers.md
