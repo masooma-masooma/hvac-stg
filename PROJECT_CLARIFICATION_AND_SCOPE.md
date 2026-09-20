@@ -30,33 +30,47 @@
 
 We are building a **Local, Autonomous Cyber-Physical Smart Building Control Loop** running entirely on a laptop in Docker:
 
+![Smart Building HVAC Controller Architecture](diagrams/system_architecture.png)
+
+*Interactive Diagram Source:*
+
+```mermaid
+flowchart TD
+    subgraph Environment ["Virtual Environment (Port 9090)"]
+        BuildSim["BuildSim Digital Twin<br/>(3D Building Simulator)"]
+    end
+
+    subgraph EdgeLayer ["Edge Microservices (Go)"]
+        Sensors["Go Sensor Gateways<br/>(Temperature, CO2, Occupancy)"]
+        Actuators["Go Actuator Service<br/>(Dwell-Time & Safety Clamp)"]
+    end
+
+    subgraph Messaging ["Telemetry Pipeline"]
+        Broker["Mosquitto MQTT Broker<br/>(Local Queue)"]
+        Pipeline["Python Pipeline Consumer<br/>& Data Quality Monitor"]
+        Store[("Local Time-Series Store<br/>SQLite / TimescaleDB & Parquet")]
+    end
+
+    subgraph Intelligence ["Decision Engine (Python)"]
+        Controller["Autonomous MPC Controller<br/>(Occupancy Forecast & Energy Optimizer)"]
+    end
+
+    subgraph Visualization ["User Interface"]
+        Dashboard["Web Dashboard<br/>(Live Heatmaps & kWh Savings)"]
+    end
+
+    BuildSim -->|"1. Poll State (REST)"| Sensors
+    Sensors -->|"2. Publish Telemetry"| Broker
+    Broker -->|"3. Ingest Stream"| Pipeline
+    Pipeline --> Store
+    Store -->|"Query Recent Window"| Controller
+    Controller -->|"4. Propose Setpoint (REST)"| Actuators
+    Actuators -->|"5. Apply Setpoint (REST)"| BuildSim
+    Store -->|"Stream Live State (WebSocket)"| Dashboard
+    BuildSim -.->|"3D Viewer Stream"| Dashboard
 ```
-                  ┌────────────────────────────────────────┐
-                  │       BuildSim Digital Twin            │
-                  │   (3D Simulator on localhost:9090)     │
-                  └───────┬────────────────────────▲───────┘
-                          │                        │
-     1. Read Observations │ (REST)      5. Actuate │ (REST Setpoints)
-                          ▼                        │
-               ┌──────────────────────┐  ┌─────────┴────────────┐
-               │ Go Sensor Gateways   │  │ Go Actuator Service   │
-               │ (Temp, CO2, People)  │  │ (Dwell-time & Clamp)  │
-               └──────────┬───────────┘  └─────────▲────────────┘
-                          │                        │
-        2. Publish (MQTT) │             4. Command │ (REST /commands)
-                          ▼                        │
-               ┌──────────────────────┐  ┌─────────┴────────────┐
-               │ Mosquitto Broker     │  │ Python Controller    │
-               │ (Local MQTT Queue)   │  │ (MPC Energy Optimizer│
-               └──────────┬───────────┘  │  & Occupancy Model)  │
-                          │              └─────────▲────────────┘
-         3. Ingest (MQTT) │                        │
-                          ▼                        │ Query Features
-               ┌──────────────────────┐            │
-               │ Python Pipeline &    ├────────────┘
-               │ SQLite / TimescaleDB │
-               └──────────────────────┘
-```
+
+[🎨 Open/Edit diagram on Mermaid.ai](https://l.mermaid.ai/7wm6mb)
 
 ### Step-by-Step Flow:
 1. **The Environment (BuildSim):** The university-provided 3D simulation server running on `:9090`.

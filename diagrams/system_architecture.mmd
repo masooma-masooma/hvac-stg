@@ -1,0 +1,34 @@
+flowchart TD
+    subgraph Environment ["Virtual Environment (Port 9090)"]
+        BuildSim["BuildSim Digital Twin<br/>(3D Building Simulator)"]
+    end
+
+    subgraph EdgeLayer ["Edge Microservices (Go)"]
+        Sensors["Go Sensor Gateways<br/>(Temperature, CO2, Occupancy)"]
+        Actuators["Go Actuator Service<br/>(Dwell-Time & Safety Clamp)"]
+    end
+
+    subgraph Messaging ["Telemetry Pipeline"]
+        Broker["Mosquitto MQTT Broker<br/>(Local Queue)"]
+        Pipeline["Python Pipeline Consumer<br/>& Data Quality Monitor"]
+        Store[("Local Time-Series Store<br/>SQLite / TimescaleDB & Parquet")]
+    end
+
+    subgraph Intelligence ["Decision Engine (Python)"]
+        Controller["Autonomous MPC Controller<br/>(Occupancy Forecast & Energy Optimizer)"]
+    end
+
+    subgraph Visualization ["User Interface"]
+        Dashboard["Web Dashboard<br/>(Live Heatmaps & kWh Savings)"]
+    end
+
+    BuildSim -->|"1. Poll State (REST)"| Sensors
+    Sensors -->|"2. Publish Telemetry"| Broker
+    Broker -->|"3. Ingest Stream"| Pipeline
+    Pipeline --> Store
+    Store -->|"Query Recent Window"| Controller
+    Controller -->|"4. Propose Setpoint (REST)"| Actuators
+    Actuators -->|"5. Apply Setpoint (REST)"| BuildSim
+    Store -->|"Stream Live State (WebSocket)"| Dashboard
+    BuildSim -.->|"3D Viewer Stream"| Dashboard
+
