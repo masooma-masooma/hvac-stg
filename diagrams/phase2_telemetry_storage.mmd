@@ -1,0 +1,32 @@
+flowchart LR
+    subgraph EdgeBroker ["Message Broker (Port 1883)"]
+        MB["Mosquitto MQTT Broker"]
+    end
+
+    subgraph IngestorService ["Telemetry Ingestor Microservice (Port 8081)"]
+        Sub["MQTT Subscriber (building/+/+/telemetry)"]
+        Pwr["HVAC Power Estimation Engine (Watts)"]
+        API["HTTP Query API (:8081)"]
+    end
+
+    subgraph HotColdStorage ["Dual-Tier Storage Pipeline (Course Notes 3)"]
+        DB[("Hot Tier: SQLite (WAL Mode)<br/>hvac.db")]
+        Bronze["Bronze Tier Export (JSONL)"]
+        Parquet["Cold Tier Archive (Parquet / ML)"]
+    end
+
+    subgraph Consumers ["Downstream Consumers (Phases 3 & 4)"]
+        MPC["Phase 3: Python MPC Optimizer"]
+        Dash["Phase 4: Real-Time Web Dashboard"]
+    end
+
+    MB -->|"MQTT Telemetry (2 Hz)"| Sub
+    Sub --> Pwr
+    Pwr -->|"Fast Transactional Inserts"| DB
+    DB -->|"Sliding Window Queries (/api/history)"| API
+    DB -->|"Aggregated Stats & kWh (/api/stats)"| API
+    API -->|"Training Data & Features"| MPC
+    API -->|"Live Metrics & Energy Savings"| Dash
+    DB -.->|"Bronze Raw Export (/api/export/jsonl)"| Bronze
+    DB -.->|"Batch Export"| Parquet
+

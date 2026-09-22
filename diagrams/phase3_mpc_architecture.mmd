@@ -1,0 +1,43 @@
+flowchart TD
+    subgraph Environment ["Cyber-Physical Building Twin"]
+        BS["BuildSim Server (:9090)"]
+        PS["Physical Simulator (ODE Physics)"]
+        SG["Sensor Gateway (MQTT Publisher)"]
+    end
+
+    subgraph DataPipeline ["Storage & Telemetry (Phases 1 & 2)"]
+        MB["Mosquitto MQTT Broker (:1883)"]
+        TI["Telemetry Ingestor & DB (:8081)"]
+    end
+
+    subgraph SmartMPC ["Smart Controller Service (:8082)"]
+        State["Current State Estimator (T, CO2, Occ)"]
+        Dyn["Thermodynamic & IAQ Model (ASHRAE 55)"]
+        MPC["MPC Horizon Optimizer (H = 6 Steps)"]
+        Dwell["Dwell-Time Anti-Chattering Filter"]
+        Base["Virtual Baseline Comparator (ASHRAE 90.1)"]
+        CompAPI["Comparison & Trajectory API (:8082)"]
+    end
+
+    subgraph ActuationPlane ["Control Actuation Plane"]
+        AC["Actuator Controller (:8080)"]
+        Clamp["Simplex Safety Guardrail (16°C - 28°C)"]
+    end
+
+    BS <--> PS
+    PS --> BS
+    BS --> SG
+    SG -->|"MQTT Publish"| MB
+    MB --> TI
+    TI -->|"GET /api/history"| State
+    State --> MPC
+    Dyn --> MPC
+    MPC -->|"Optimal Setpoint & Damper"| Dwell
+    Dwell -->|"POST /commands"| AC
+    AC --> Clamp
+    Clamp -->|"PUT /api/actuators"| BS
+
+    State --> Base
+    MPC --> CompAPI
+    Base --> CompAPI
+

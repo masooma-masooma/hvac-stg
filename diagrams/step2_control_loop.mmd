@@ -1,0 +1,21 @@
+flowchart LR
+    subgraph EdgeDevice ["Edge Microservices (Docker Compose)"]
+        AC["Actuator Controller (:8080)"]
+        PS["Physical Simulator"]
+        SG["Sensor Gateway"]
+    end
+
+    subgraph DigitalTwin ["Digital Twin & Middleware"]
+        BS["BuildSim Server (:9090)"]
+        MB["Mosquitto MQTT Broker (:1883)"]
+    end
+
+    User["Operator / Optimizer"] -->|"POST /commands (JSON)"| AC
+    AC -->|"HTTP PUT /api/actuators/*"| BS
+    BS -->|"HTTP GET Actuators & Occupancy"| PS
+    PS -->|"Run Thermal & CO2 ODE Dynamics"| PS
+    PS -->|"HTTP PUT /api/sensors/*"| BS
+    BS -->|"HTTP GET /api/sensors/* (2s loop)"| SG
+    SG -->|"Publish JSON Telemetry"| MB
+    MB -->|"MQTT Topic: building/level0/A109/telemetry"| Clients["Edge Ingestor / Dashboard"]
+
