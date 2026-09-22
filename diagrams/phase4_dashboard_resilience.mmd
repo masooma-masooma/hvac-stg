@@ -1,0 +1,43 @@
+flowchart TD
+    subgraph Users ["User & Operator Interface"]
+        Browser["Operator Browser (Chrome / Edge)"]
+    end
+
+    subgraph DashboardService ["Visual Web Dashboard Container (:3000)"]
+        UI["Web Dashboard UI (HTML5, Dark Theme)"]
+        Charts["Real-Time Charts (Chart.js)"]
+        KPIs["Energy Savings & KPI Gauges"]
+        ChaosControls["Interactive Controls & Chaos Injector"]
+    end
+
+    subgraph AutonomousCore ["Autonomous Edge Microservices"]
+        MPC["Smart MPC Controller (:8082)"]
+        AC["Actuator Controller (:8080)"]
+        Ingestor["Telemetry Ingestor & SQLite (:8081)"]
+        BS["BuildSim 3D Digital Twin (:9090)"]
+        Mosq["Mosquitto MQTT Broker (:1883)"]
+        Sim["Physical Simulator (Self-Healing)"]
+    end
+
+    subgraph ChaosTesting ["Empirical Resilience & Chaos Suite"]
+        T1["Test 1: Broker Crash (MTTR: 1.05s)"]
+        T2["Test 2: Memory Wipe Self-Healing (MTTR: 15.07s)"]
+        T3["Test 3: Simplex Safety Clamping (MTTR: 0.03s)"]
+        T4["Test 4: Autonomous Benchmarking (55.5% Saved)"]
+    end
+
+    Browser <-->|"HTTP :3000"| UI
+    UI --- Charts
+    UI --- KPIs
+    UI --- ChaosControls
+
+    UI -->|"Fetch /api/comparison & /api/mpc/trajectory"| MPC
+    UI -->|"Fetch /api/history & /api/stats"| Ingestor
+    ChaosControls -->|"Inject Occupancy (PUT /api/occupancy)"| BS
+    ChaosControls -->|"Manual Override (POST /commands)"| AC
+
+    ChaosTesting -.->|"Validates Recovery Under Failure"| Mosq
+    ChaosTesting -.->|"Validates Recovery Under Failure"| BS
+    ChaosTesting -.->|"Validates Recovery Under Failure"| AC
+    ChaosTesting -.->|"Validates Recovery Under Failure"| MPC
+
