@@ -1,0 +1,26 @@
+[
+  {
+    "test": "Broker Crash Recovery",
+    "status": "PASS",
+    "mttr_seconds": 1.05,
+    "details": "Clients auto-reconnected and resumed telemetry pipeline."
+  },
+  {
+    "test": "Digital Twin Self-Healing",
+    "status": "PASS",
+    "mttr_seconds": 15.07,
+    "details": "Simulator automatically detected wiped memory and re-seeded equipment."
+  },
+  {
+    "test": "Simplex Safety Clamping",
+    "status": "PASS",
+    "mttr_seconds": 0.03,
+    "details": "48.0\u00b0C clamped to 28.0\u00b0C and 4.0\u00b0C clamped to 16.0\u00b0C by Simplex supervisor."
+  },
+  {
+    "test": "MPC Performance Benchmark",
+    "status": "PASS",
+    "mttr_seconds": 0.01,
+    "details": "Smart MPC saved 55.5% energy over baseline with comfort preserved."
+  }
+]

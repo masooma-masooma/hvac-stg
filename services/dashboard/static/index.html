@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart HVAC & MPC Autonomous Optimizer Dashboard | D7065E</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg-dark: #090d16;
+      --card-bg: rgba(22, 31, 48, 0.7);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent-blue: #38bdf8;
+      --accent-green: #22c55e;
+      --accent-amber: #f59e0b;
+      --accent-red: #ef4444;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background: var(--bg-dark); color: var(--text-main); min-height: 100vh; padding: 20px; }
+
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--card-border); }
+    .header h1 { font-size: 22px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 10px; }
+    .header .badges { display: flex; gap: 8px; }
+    .badge { padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    .badge-green { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+    .badge-blue { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
+
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 18px; backdrop-filter: blur(12px); }
+    .card-label { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+    .card-value { font-size: 28px; font-weight: 800; color: #fff; }
+    .card-sub { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+
+    .savings-card { border-color: rgba(34, 197, 94, 0.4); background: linear-gradient(135deg, rgba(34, 197, 94, 0.1) 0%, rgba(22, 31, 48, 0.7) 100%); }
+    .savings-val { color: #4ade80; text-shadow: 0 0 20px rgba(34, 197, 94, 0.4); }
+
+    .charts-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 24px; }
+    @media (max-width: 960px) { .charts-grid { grid-template-columns: 1fr; } }
+    .chart-container { height: 260px; position: relative; margin-top: 10px; }
+
+    .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 960px) { .bottom-grid { grid-template-columns: 1fr; } }
+
+    .decision-log { height: 180px; overflow-y: auto; font-family: monospace; font-size: 12px; line-height: 1.6; color: #cbd5e1; background: rgba(0,0,0,0.25); padding: 12px; border-radius: 8px; }
+    .log-entry { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+    .log-time { color: var(--accent-blue); }
+
+    .btn-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+    button { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); padding: 8px 14px; border-radius: 6px; font-weight: 600; font-size: 13px; cursor: pointer; transition: all 0.2s; }
+    button:hover { background: rgba(56, 189, 248, 0.3); transform: translateY(-1px); }
+    button.btn-warn { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border-color: rgba(245, 158, 11, 0.4); }
+    button.btn-warn:hover { background: rgba(245, 158, 11, 0.3); }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div>
+      <h1>⚡ Smart HVAC Autonomous Optimization System</h1>
+      <p style="color: var(--text-muted); font-size: 13px; margin-top: 4px;">D7065E — Embedded Intelligence at the Edge | Room A109 Digital Twin</p>
+    </div>
+    <div class="badges">
+      <span class="badge badge-green">● 7 Containers Active</span>
+      <span class="badge badge-blue">MPC Horizon: 30 Min</span>
+      <span class="badge badge-green">Auto-Seeding Active</span>
+    </div>
+  </div>
+
+  <!-- KPI Cards -->
+  <div class="kpi-grid">
+    <div class="card savings-card">
+      <div class="card-label">Energy Saved vs. Baseline</div>
+      <div class="card-value savings-val" id="savings-pct">--%</div>
+      <div class="card-sub" id="savings-kwh">0.0000 kWh saved</div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Indoor Climate (Room A109)</div>
+      <div class="card-value" id="current-temp">--°C</div>
+      <div class="card-sub">Target Setpoint: <span id="current-setpoint" style="color:#fff; font-weight:600;">--°C</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Air Quality (CO₂)</div>
+      <div class="card-value" id="current-co2">-- ppm</div>
+      <div class="card-sub">Ventilation Damper: <span id="current-damper" style="color:#fff; font-weight:600;">Level --</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Room Occupancy</div>
+      <div class="card-value" id="current-occ">-- persons</div>
+      <div class="card-sub">Instant Power: <span id="current-power" style="color:#fff; font-weight:600;">-- W</span></div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts-grid">
+    <div class="card">
+      <div class="card-label">Real-Time Climate Tracking vs. ASHRAE Comfort Band (20°C - 24°C)</div>
+      <div class="chart-container">
+        <canvas id="tempChart"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">MPC 30-Minute Lookahead Horizon (Predicted Trajectory)</div>
+      <div class="chart-container">
+        <canvas id="mpcChart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Grid: Interactive Controls & Decision Log -->
+  <div class="bottom-grid">
+    <div class="card">
+      <div class="card-label">🎮 Interactive Simulation & Chaos Controls</div>
+      <p style="font-size: 13px; color: var(--text-muted); margin-top: 4px;">Inject real-time events into BuildSim to observe the autonomous MPC reaction:</p>
+      
+      <div class="btn-group">
+        <button onclick="setOccupancy(0)">Empty Room (0p)</button>
+        <button onclick="setOccupancy(5)">Small Group (5p)</button>
+        <button onclick="setOccupancy(15)">Crowded Lecture (15p)</button>
+        <button class="btn-warn" onclick="testChaos()">⚡ Trigger Chaos Test</button>
+        <button style="background: rgba(34, 197, 94, 0.2); color: #4ade80; border-color: rgba(34, 197, 94, 0.4);" onclick="resetBenchmarks()">🔄 Reset Benchmarks</button>
+      </div>
+
+      <div style="margin-top: 16px; font-size: 12px; color: var(--text-muted);">
+        BuildSim 3D Viewer: <a href="http://localhost:9090" target="_blank" style="color: var(--accent-blue); text-decoration: none; font-weight:600;">http://localhost:9090 ↗</a> &nbsp;|&nbsp; 
+        SQLite API: <a href="http://localhost:8081/api/stats?room=A109" target="_blank" style="color: var(--accent-blue); text-decoration: none; font-weight:600;">Port 8081 ↗</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">🧠 Autonomous Decision & Explainability Stream</div>
+      <div class="decision-log" id="decision-log">
+        <div class="log-entry"><span class="log-time">[Init]</span> Connecting to MPC Optimizer & Ingestor telemetry feeds...</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,133 @@
+name: hvac
+
+services:
+  buildsim:
+    build:
+      context: ./buildingsim
+      dockerfile: Dockerfile
+    container_name: buildsim
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - hvac-network
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    restart: unless-stopped
+    networks:
+      - hvac-network
+
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.microservice
+      args:
+        TARGET_SERVICE: simulator
+    container_name: physical-simulator
+    environment:
+      - BUILDSIM_URL=http://buildsim:9090
+    restart: unless-stopped
+    depends_on:
+      - buildsim
+    networks:
+      - hvac-network
+
+  sensor-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.microservice
+      args:
+        TARGET_SERVICE: sensor-gateway
+    container_name: sensor-gateway
+    environment:
+      - BUILDSIM_URL=http://buildsim:9090
+      - MQTT_BROKER=tcp://mosquitto:1883
+    restart: unless-stopped
+    depends_on:
+      - buildsim
+      - mosquitto
+    networks:
+      - hvac-network
+
+  actuator-controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.microservice
+      args:
+        TARGET_SERVICE: actuator-controller
+    container_name: actuator-controller
+    ports:
+      - "8080:8080"
+    environment:
+      - BUILDSIM_URL=http://buildsim:9090
+    restart: unless-stopped
+    depends_on:
+      - buildsim
+    networks:
+      - hvac-network
+
+  ingestor:
+    build:
+      context: .
+      dockerfile: Dockerfile.microservice
+      args:
+        TARGET_SERVICE: ingestor
+    container_name: telemetry-ingestor
+    ports:
+      - "8081:8081"
+    environment:
+      - MQTT_BROKER=tcp://mosquitto:1883
+      - DB_PATH=/data/db/hvac.db
+      - PORT=8081
+      - BUILDSIM_URL=http://buildsim:9090
+    volumes:
+      - ./data/db:/data/db
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+    networks:
+      - hvac-network
+
+  smart-controller:
+    build:
+      context: ./services/smart-controller
+      dockerfile: Dockerfile
+    container_name: smart-controller
+    ports:
+      - "8082:8082"
+    environment:
+      - INGESTOR_URL=http://telemetry-ingestor:8081
+      - ACTUATOR_URL=http://actuator-controller:8080
+      - BUILDSIM_URL=http://buildsim:9090
+      - CONTROL_INTERVAL=10.0
+      - TARGET_ROOM=A109
+    restart: unless-stopped
+    depends_on:
+      - actuator-controller
+      - ingestor
+    networks:
+      - hvac-network
+
+  dashboard:
+    build:
+      context: ./services/dashboard
+      dockerfile: Dockerfile
+    container_name: hvac-dashboard
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on:
+      - smart-controller
+      - ingestor
+    networks:
+      - hvac-network
+
+networks:
+  hvac-network:
+    driver: bridge
