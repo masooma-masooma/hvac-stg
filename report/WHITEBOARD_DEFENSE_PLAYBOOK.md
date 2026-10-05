@@ -1,4 +1,4 @@
-# D7065E — Whiteboard Oral Defense Playbook
+# D7065E — Whiteboard Oral Defense Playbookk
 ## Smart HVAC & Climate Optimization System
 **Candidate:** Masooma Masooma  
 **Examiner:** Johan Kristiansson & Course Staff | Luleå University of Technology (LTU)  
