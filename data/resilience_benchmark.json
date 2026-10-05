@@ -2,25 +2,26 @@
   {
     "test": "Broker Crash Recovery",
     "status": "PASS",
-    "mttr_seconds": 1.05,
-    "details": "Clients auto-reconnected and resumed telemetry pipeline."
+    "mttr_seconds": 0.75,
+    "details": "MQTT connection re-established; telemetry stream resumed. Telemetry emitted at QoS 0 during outage dropped as expected."
   },
   {
     "test": "Digital Twin Self-Healing",
     "status": "PASS",
-    "mttr_seconds": 15.07,
-    "details": "Simulator automatically detected wiped memory and re-seeded equipment."
+    "mttr_seconds": 3.88,
+    "details": "Simulator watchdog detected 404 and autonomously re-registered Room A109 equipment."
   },
   {
-    "test": "Simplex Safety Clamping",
+    "test": "Safety Guardrail Clamping",
     "status": "PASS",
-    "mttr_seconds": 0.03,
-    "details": "48.0\u00b0C clamped to 28.0\u00b0C and 4.0\u00b0C clamped to 16.0\u00b0C by Simplex supervisor."
+    "mttr_seconds": 0.02,
+    "details": "48.0\u00b0C clamped to 28.0\u00b0C and 4.0\u00b0C clamped to 16.0\u00b0C by safety guardrail."
   },
   {
-    "test": "MPC Performance Benchmark",
-    "status": "PASS",
-    "mttr_seconds": 0.01,
-    "details": "Smart MPC saved 55.5% energy over baseline with comfort preserved."
+    "evaluation": "Comparative Baseline Benchmark",
+    "status": "FAIL",
+    "energy_savings_percentage": -148.6,
+    "comfort_preserved": false,
+    "details": "Smart MPC saved -148.6% energy over baseline with comfort preserved."
   }
 ]

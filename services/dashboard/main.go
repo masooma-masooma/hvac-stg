@@ -12,6 +12,11 @@ func main() {
 		port = "3000"
 	}
 
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
 	fs := http.FileServer(http.Dir("./static"))
 	http.Handle("/", fs)
 
@@ -20,3 +25,4 @@ func main() {
 		log.Fatalf("[Dashboard] Server error: %v", err)
 	}
 }
+
