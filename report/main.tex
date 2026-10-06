@@ -1,26 +1,21 @@
 \documentclass[conference,10pt]{IEEEtran}
 
 \usepackage{amsmath,amssymb,amsfonts}
-\usepackage{algorithmic}
 \usepackage{graphicx}
 \usepackage{textcomp}
 \usepackage{xcolor}
 \usepackage{booktabs}
 \usepackage{hyperref}
 \usepackage{cite}
-\usepackage{subcaption}
 
-\hypersetup{
-    colorlinks=true,
-    linkcolor=blue,
-    filecolor=magenta,      
-    urlcolor=cyan,
-    citecolor=blue,
-}
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=cyan, citecolor=blue}
+
+\newcommand{\cotwo}{CO\textsubscript{2}}
+\newcommand{\degC}{\,\textdegree{}C}
 
 \begin{document}
 
-\title{Autonomous Model Predictive Control for Edge HVAC Systems: Multi-Objective Thermal and Air Quality Optimization in a Cyber-Physical Digital Twin}
+\title{Autonomous Model Predictive Control for an Edge HVAC System: Forecast-Driven Thermal and Air-Quality Optimisation in a Cyber-Physical Digital Twin}
 
 \author{
 \IEEEauthorblockN{Masooma Masooma}
@@ -28,291 +23,124 @@
 \textit{Lule\aa\ University of Technology (LTU)}\\
 Lule\aa, Sweden \\
 Email: masoom-4@student.ltu.se}
-\and
-\IEEEauthorblockN{Project Partner}
-\IEEEauthorblockA{\textit{Department of Computer Science, Electrical and Space Engineering} \\
-\textit{Lule\aa\ University of Technology (LTU)}\\
-Lule\aa, Sweden}
 }
 
 \maketitle
 
 \begin{abstract}
-Heating, Ventilation, and Air Conditioning (HVAC) systems account for roughly 40\% of commercial building electrical consumption. Conventional commercial control architectures rely upon rigid, timer-based thermostats that fail to account for building thermal inertia or fluctuating human occupancy, frequently causing excessive energy waste or delayed thermal compensation. 
-
-This paper presents an autonomous cyber-physical edge computing architecture for decentralized HVAC optimization developed for the LTU A-House digital twin (BuildSim). The system decouples sensing, storage, optimization, and actuation into eight containerized microservices operating over a local Docker network. Telemetry streams via an asynchronous MQTT message broker (2~Hz) into an edge-optimized Write-Ahead Logging (WAL) SQLite time-series engine. An autonomous Python-based Model Predictive Control (MPC) optimizer evaluates a 30-minute lookahead horizon ($H=6$ steps), optimizing a multi-objective cost function that balances electrical energy minimization against ASHRAE~55 thermal comfort ($20.0^\circ\text{C}$ to $24.0^\circ\text{C}$) and Swedish regulatory indoor air quality bounds ($\text{CO}_2 < 1000\text{ ppm}$). A Simplex safety supervisor enforces actuator dwell-time constraints (60~s) and hard safety clamps ($16^\circ\text{C} \le T \le 28^\circ\text{C}$) to eliminate mechanical chattering. 
-
-Empirical evaluation against a parallel fixed-schedule commercial baseline demonstrates electrical power reductions between 32.1\% and 65.0\% under active occupancy, while strictly preserving comfort. Automated chaos engineering fault injection confirms rapid system resilience, exhibiting Mean Time to Recovery (MTTR) of 1.05~seconds for broker failures, 15.07~seconds for digital twin state wipes via autonomous self-healing, and 0.03~seconds for safety clamping. Finally, this work presents a formal architectural trade-off analysis addressing protocol selection (WebSockets vs. MQTT vs. REST) in edge computing environments.
+Most HVAC installations run fixed time schedules that heat and ventilate rooms whether or not anyone is there. This paper presents an autonomous edge controller for Room A109 of the LTU A-House digital twin (BuildSim). Eight Docker containers implement a sense--broker--store--predict--decide--act loop: a 2~Hz sensor gateway publishes over MQTT, an ingestor validates and stores telemetry in SQLite (WAL), and a Python controller runs a receding-horizon Model Predictive Controller (MPC) every 10~s. The MPC uses a Random Forest occupancy forecaster (RMSE 1.26 persons at 5--30~min versus 3.60 for persistence) and a gradient-boosted thermal/\cotwo{} predictor (R\textsuperscript{2}~=~0.9967) to score 8\,000 action sequences over a 30-minute horizon. Commands pass a deterministic safety guardrail, and stale telemetry triggers a Safe Fallback mode. In a simulated work week the MPC used 53.8\% less energy than a fixed schedule and spent only 0.2\% of occupied time above 1000~ppm \cotwo{}, but it used 18.4\% more energy than a rule-based thermostat and 9.1\% more than demand-controlled ventilation, which exceeded the \cotwo{} limit 27.9\% and 12.7\% of the time. Fault injection shows recovery from a broker restart in 1.1~s, from a digital-twin state wipe in 3.8~s, Safe Fallback 37.4~s after the physics simulator stops, and controller restart in 7.6~s.
 \end{abstract}
 
 \begin{IEEEkeywords}
-Cyber-Physical Systems, Model Predictive Control, Edge Computing, Building Energy Optimization, Digital Twin, MQTT, Microservices, Simplex Architecture.
+Cyber-physical systems, model predictive control, edge computing, occupancy forecasting, building energy, digital twin, MQTT.
 \end{IEEEkeywords}
 
 \section{Introduction}
+Heating and ventilation dominate building energy use in northern Sweden, yet most rooms follow fixed schedules~\cite{ashrae901}. Empty rooms are conditioned, and occupied rooms receive a fixed ventilation rate regardless of how many people are present, so \cotwo{} can exceed the 1000~ppm guidance~\cite{afs2020} during full lectures. We built a closed-loop controller that senses temperature, \cotwo{} and occupancy, forecasts occupancy, predicts the room's response to candidate actions, optimises with MPC~\cite{camacho2013model}, and is compared against fixed-schedule and rule-based baselines while surviving component faults. The engineering tensions are energy versus comfort~\cite{ashrae55, en16798} and air quality, actuator wear under frequent re-planning, and resilience to broker restarts, twin state loss and frozen sensors.
 
-Commercial and institutional facilities consume massive quantities of electrical energy for environmental temperature regulation and ventilation. In cold climate regions such as northern Sweden, space heating and mechanical air exchange represent the single largest operational expense for facilities managers. Despite advances in sensor technology, contemporary commercial buildings still rely overwhelmingly on rule-based, static timer schedules (e.g., ASHRAE Standard 90.1 baselines~\cite{ashrae901}). These conventional systems maintain rigid heating and ventilation setpoints regardless of actual room occupancy, resulting in significant energy waste conditioning unoccupied spaces. Conversely, during sudden occupant influxes—such as university lectures or conference seminars—static thermostats lag behind dynamic metabolic heat gains and rapid carbon dioxide ($\text{CO}_2$) accumulation, leading to degraded indoor air quality and thermal discomfort~\cite{ashrae55, afs2020}.
+\section{Digital Twin and Room Physics}
+BuildSim holds the A-House state in memory and renders it in 3D but has no thermal physics. A \texttt{physical-simulator} service integrates the room equations every second (explicit Euler), reads setpoint, damper and occupancy from BuildSim, writes sensor values back, and re-registers A109's equipment when BuildSim loses it.
 
-Developing an autonomous, edge-native control system to address this challenge presents three fundamental engineering tensions:
-\begin{enumerate}
-    \item \textbf{Conflicting Physical Objectives:} Minimizing electrical power draw directly conflicts with maintaining tight thermal comfort bounds ($20.0\text{--}24.0^\circ\text{C}$) and mechanical ventilation dilution ($\text{CO}_2 < 1000\text{ ppm}$). A naive optimizer seeking minimum energy would simply terminate outside ventilation, causing rapid $\text{CO}_2$ buildup in violation of workplace health standards~\cite{afs2020}.
-    \item \textbf{Actuator Wear vs. Control Precision (Chattering):} Unconstrained digital optimizers frequently oscillate control outputs between discrete states at high frequency. In physical cyber-physical systems (CPS), rapid cycling of thermal valves and compressor stages causes rapid mechanical fatigue and equipment failure~\cite{camacho2013model}.
-    \item \textbf{Decoupled Edge Resilience:} Edge IoT environments suffer from network partitions, broker crashes, and sensor dropouts. Sensor gateways must not couple directly to optimization agents via synchronous remote procedure calls (RPC), and restarted microservices must self-heal without manual human intervention.
-\end{enumerate}
+With room temperature $T$, $T_{out}=12$\degC, damper $D\in\{0,\dots,3\}$ and occupancy $N$:
+\begin{equation}
+\frac{dT}{dt} = h - (k_{env} + k_{vent} D)(T - T_{out}) + k_{occ} N
+\end{equation}
+with $k_{env}=0.005$~s$^{-1}$, $k_{vent}=0.008$~s$^{-1}$ per level and $k_{occ}=0.01$\degC/s per person ($\approx$90~W). The radiator rate
+\begin{equation}
+h = \mathrm{clip}\big(k_{hvac}(T_{set}-T) + c\,[(k_{env}+k_{vent}D)(T-T_{out}) - k_{occ}N],\,0,\,h_{max}\big)
+\end{equation}
+with $c=\mathrm{clip}(1-(T-T_{set})/0.5,0,1)$ and $k_{hvac}=0.04$~s$^{-1}$ models a local thermostat that settles at the setpoint, switches off above it, and cannot cool. Damper level 3 corresponds to roughly 175~L/s of outdoor air. \cotwo{} follows
+\begin{equation}
+\frac{dC}{dt} = 1.5\,N - (0.01 + 0.02\,D)(C - 420)\quad[\text{ppm/s}]
+\end{equation}
+and electrical power is $P = 25 + 45D + 8750\,h$~W with heating capped at 2.5~kW. The same equations are implemented in the Python controller, the Go simulator and the ingestor's power model. The constants make the room settle in about a minute rather than hours so that live demonstrations react visibly; Section~\ref{sec:limits} discusses the consequences.
 
-To address these challenges within the scope of the D7065E Embedded Intelligence course at Lule\aa\ University of Technology, we designed, deployed, and validated an autonomous edge HVAC system interfaced with the university's A-House digital twin (BuildSim). The system architecture embraces specification-driven systems engineering, combining high-speed telemetry streaming, local time-series persistence, a receding-horizon Model Predictive Controller (MPC), a Simplex safety supervisor, and a live web dashboard.
-
-The remainder of this paper is organized as follows: Section~II details the cyber-physical digital twin and the mathematical formulations for thermal and $\text{CO}_2$ dynamics. Section~III outlines the C4 distributed microservice architecture. Section~IV develops the MPC optimizer and Simplex safety filter. Section~V provides a rigorous protocol comparison between WebSockets, MQTT, and REST. Section~VI and Section~VII present empirical benchmarking and chaos resilience results. Section~VIII concludes the paper.
-
----
-
-\section{Digital Twin \& Mathematical Dynamics}
-
-\subsection{The BuildSim Simulation Environment}
-The system targets Room A109 of the LTU A-House modeled within BuildSim. BuildSim operates as a centralized state coordinator and 3D visualizer over HTTP REST and WebSocket connections. Crucially, BuildSim maintains room state in volatile memory and provides no native thermodynamic simulation. Therefore, the cyber-physical loop requires an external, discrete-time physics process to advance thermodynamic and mass-balance equations and update BuildSim sensor entities.
-
+\section{Architecture}
 \begin{figure}[t]
-    \centering
-    \includegraphics[width=\linewidth]{figures/step2_control_loop.png}
-    \caption{Phase 1 Cyber-Physical Closed-Loop: Continuous interaction between BuildSim, the Physical ODE Simulator, Sensor Gateway, and Actuator Controller.}
-    \label{fig:control_loop}
+\centering
+\includegraphics[width=\linewidth]{figures/system_architecture.png}
+\caption{Containers and protocols.}
+\label{fig:arch}
 \end{figure}
+Fig.~\ref{fig:arch} shows the eight containers. The Go \texttt{sensor-gateway} polls BuildSim at 2~Hz and publishes to Mosquitto (QoS~0), forwarding each sensor's own timestamp. The Go \texttt{telemetry-ingestor} rejects incomplete bundles and implausible values (temperature outside $-20$--60\degC, \cotwo{} outside 300--5000~ppm, occupancy outside 0--200), stores a row only when the sensor timestamp advanced (so a frozen simulator produces no rows), reads the live setpoint and damper from BuildSim for every row, computes power from them, and writes SQLite in WAL mode. Energy integrates power over the real time between rows. The Python \texttt{smart-controller} hosts the models, the MPC, Safe Fallback and a fixed-schedule baseline twin; the Go \texttt{actuator-controller} is the safety guardrail; a static dashboard shows live state.
 
-\subsection{First-Principles Thermodynamic Heat Balance}
-The thermal state transition of the indoor room air temperature $T(t)$ is governed by a first-order Ordinary Differential Equation (ODE) incorporating building envelope heat loss, HVAC thermal injection, and sensible human metabolic heat gains:
+\section{Learned Models}
+\subsection{Model 01: Occupancy Forecaster}
+A Random Forest regressor (60 trees, depth 14) predicts occupancy 5--30~min ahead from local-time calendar features of the target time (hour, weekday, LTU lecture block, lunch, fika), lead time and current occupancy. It is trained on an 8-week synthetic LTU timetable simulated in 5-minute slots with per-lecture attendance, 15\% cancellations and evening study groups; labels are the occupancy observed at $t+$lead. On a chronological hold-out (96 768 samples) it reaches R\textsuperscript{2}~=~0.955 and RMSE 1.26 persons versus 3.60 for persistence; on the unseen benchmark week its 10--30~min MAE is 1.05 persons.
 
-\begin{equation}
-C_{\text{air}} \frac{dT(t)}{dt} = \dot{Q}_{\text{env}}(t) + \dot{Q}_{\text{HVAC}}(t) + \dot{Q}_{\text{occ}}(t)
-\label{eq:heat_ode}
-\end{equation}
+\subsection{Model 02: Thermal and \cotwo{} Predictor}
+Two gradient-boosted tree ensembles predict the change in temperature and \cotwo{} over a step from physics-informed features (state, action, occupancy, heating lift, envelope and ventilation drivers, step length). Training combines 4 516 transitions extracted from logged telemetry with 20 000 transitions simulated from the room equations. Held-out R\textsuperscript{2} is 0.9967 for temperature (RMSE 0.26\degC) and 0.9993 for \cotwo{} (RMSE 13.7~ppm). Power is derived from the predicted trajectory by an energy balance rather than learned. Most training data is synthetic, which makes these figures optimistic.
 
-Where:
-\begin{align}
-\dot{Q}_{\text{env}}(t) &= U \cdot A \cdot (T_{\text{ambient}} - T(t)) \\
-\dot{Q}_{\text{HVAC}}(t) &= K_{\text{hvac}} \cdot (u_{\text{set}}(t) - T(t)) \\
-\dot{Q}_{\text{occ}}(t) &= q_{\text{human}} \cdot N_{\text{occ}}(t)
-\end{align}
-
-Here, $C_{\text{air}}$ denotes the effective thermal capacitance of the room ($75.0\text{ m}^3$ air volume), $U \cdot A$ represents the thermal transmittance coefficient of the exterior envelope, $T_{\text{ambient}}$ is the Nordic ambient outdoor temperature ($12.0^\circ\text{C}$), $K_{\text{hvac}}$ represents the heat exchange coefficient of the radiator, and $q_{\text{human}} \approx 75\text{ W}$ represents sensible human metabolic heat emission per occupant. In our discrete-time simulator ($\Delta t = 1.0\text{ s}$), this translates to an empirical cooling drift rate of $0.005\text{ s}^{-1}$ towards ambient and a heating response rate of $0.04\text{ s}^{-1}$.
-
-\subsection{Indoor Air Quality ($\text{CO}_2$) Mass Balance}
-Indoor $\text{CO}_2$ concentration $C(t)$ (in parts per million, ppm) is modeled via conservation of mass between human exhalation generation and mechanical damper dilution:
-
-\begin{equation}
-V_{\text{room}} \frac{dC(t)}{dt} = G_{\text{co2}} \cdot N_{\text{occ}}(t) - \dot{V}_{\text{vent}}(u_{\text{dmp}}) \cdot (C(t) - C_{\text{amb}})
-\label{eq:co2_ode}
-\end{equation}
-
-Where $G_{\text{co2}} \approx 1.5\text{ ppm}\cdot\text{s}^{-1}$ per person represents metabolic respiration, $C_{\text{amb}} = 420\text{ ppm}$ represents outdoor ambient clean air, and $\dot{V}_{\text{vent}}$ is governed by the discrete damper actuation state $u_{\text{dmp}} \in \{0, 1, 2, 3\}$, corresponding to an effective air change exchange rate between 1\% and 7\% per second.
-
-\subsection{Electrical Power Draw Formulation}
-The total instantaneous electrical power $P(t)$ (in Watts) consumed by the HVAC equipment is calculated as the sum of base electronics standby, mechanical ventilation fan load, and electric radiator heating lift:
-
-\begin{equation}
-P(t) = P_{\text{standby}} + P_{\text{fan}}(u_{\text{dmp}}) + P_{\text{heat}}(u_{\text{set}}, T)
-\label{eq:power}
-\end{equation}
-
-Where $P_{\text{standby}} = 25.0\text{ W}$, $P_{\text{fan}}(u_{\text{dmp}}) = 45.0 \cdot u_{\text{dmp}}\text{ W}$, and heating power is proportionally clamped:
-\begin{equation}
-P_{\text{heat}} = \min\left(2500.0, \, \max\left(0.0, \, (u_{\text{set}} - T(t)) \cdot 350.0\right)\right)
-\end{equation}
-
-Cumulative energy consumption over time interval $\tau$ is integrated as:
-\begin{equation}
-E_{\text{kWh}} = \frac{1}{3.6 \times 10^6} \int_0^\tau P(t) \, dt
-\end{equation}
-
----
-
-\section{Distributed Edge Architecture \& C4 Model}
-
-The software architecture is engineered following the C4 Model specification for distributed systems~\cite{brown2018software}. The system comprises eight independent containers orchestrated via Docker Compose on an isolated bridge network (`hvac-network`).
-
-\begin{figure*}[t]
-    \centering
-    \includegraphics[width=0.88\linewidth]{figures/phase4_dashboard_resilience.png}
-    \caption{C4 Level 2 Container Architecture: Interconnection topology between Cyber-Physical Twin, Asynchronous Telemetry Pipeline, Autonomous MPC Optimizer, and Operator Web Dashboard.}
-    \label{fig:c4_container}
-\end{figure*}
-
-\subsection{Microservice Decomposition}
-\begin{enumerate}
-    \item \textbf{Digital Twin Server (`buildsim`):} Go binary serving 3D visual assets on port 9090.
-    \item \textbf{Physical Simulator (`physical-simulator`):} Discrete ODE physics solver evaluating equations (\ref{eq:heat_ode}) and (\ref{eq:co2_ode}) every second, with embedded auto-seeding logic.
-    \item \textbf{IoT Sensor Gateway (`sensor-gateway`):} High-frequency (2~Hz) poller collecting indoor temperature, $\text{CO}_2$, and occupancy, formatting observations into structured JSON schemas, and publishing to MQTT.
-    \item \textbf{Message Broker (`mosquitto`):} Eclipse Mosquitto MQTT broker on port 1883 serving as the central asynchronous telemetry backbone.
-    \item \textbf{Telemetry Ingestor (`telemetry-ingestor`):} Edge data pipeline consumer subscribing to `building/+/+/telemetry`, computing instantaneous electrical power draw, persisting records to SQLite WAL storage, and exposing an HTTP query API on port 8081.
-    \item \textbf{Smart MPC Controller (`smart-controller`):} Python 3.11 service on port 8082 executing the receding-horizon optimization algorithm and running the parallel baseline comparator.
-    \item \textbf{Actuator Controller (`actuator-controller`):} Transactional REST service on port 8080 hosting the Simplex safety supervisor and dispatching validated states to BuildSim.
-    \item \textbf{Visual Web Dashboard (`hvac-dashboard`):} Lightweight Go web server container on port 3000 delivering real-time telemetry charts, energy savings dials, and interactive simulation controls.
-\end{enumerate}
-
-\subsection{Edge Data Pipeline \& Storage Tiering}
-To satisfy the performance requirements of real-time control without database locking, the Telemetry Ingestor incorporates a dual-tier storage strategy:
-\begin{itemize}
-    \item \textbf{Hot Hot-Tier Storage:} Pure-Go SQLite configured in Write-Ahead Logging (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`). Tables are indexed on `(room, timestamp DESC)` enabling sliding-window time-series queries (e.g., retrieving the last 30 minutes of telemetry) in sub-millisecond execution times.
-    \item \textbf{Cold-Tier Archiving:} An append-only streaming endpoint (`GET /api/export/jsonl`) exposes raw telemetry in Line-Delimited JSON (JSONL), ready for batch ingestion into Parquet or cloud storage lakes.
-\end{itemize}
-
----
-
-\section{Autonomous Model Predictive Control \& Runtime Safety}
-
-\subsection{Receding-Horizon Formulation}
-Unlike myopic feedback controllers (such as PID or bang-bang thermostats), Model Predictive Control explicitly accounts for system thermal momentum by forecasting future states over a finite prediction horizon $H$~\cite{camacho2013model}. 
-
-Our controller evaluates an optimization horizon of $H = 6$ discrete steps, with each step representing $\Delta t_{\text{step}} = 300\text{ s}$ (a 30-minute lookahead window). The candidate discrete control action space is defined over setpoint and damper pairings:
-\begin{align}
-u_{\text{set}} &\in \{18.0, 19.5, 20.5, 21.5, 22.5, 24.0\}^\circ\text{C} \\
-u_{\text{dmp}} &\in \{0, 1, 2, 3\}
-\end{align}
-
+\section{Model Predictive Control and Safety}
 \begin{figure}[t]
-    \centering
-    \includegraphics[width=\linewidth]{figures/phase3_mpc_architecture.png}
-    \caption{Model Predictive Control Optimizer Workflow: Receding horizon evaluation, Dwell-time anti-chattering filter, and parallel baseline comparator.}
-    \label{fig:mpc_arch}
+\centering
+\includegraphics[width=\linewidth]{figures/phase3_mpc_architecture.png}
+\caption{Decision path from telemetry to actuators.}
+\label{fig:mpc}
 \end{figure}
+Every 10~s the controller solves a problem over six 5-minute steps (Fig.~\ref{fig:mpc}). Actions are $T_{set}\in\{18,19.5,20.5,21.5,22.5\}$\degC{} $\times$ $D\in\{0,\dots,3\}$. With move blocking the action may change at three block starts (default steps 1, 2 and 4; the third block is aligned with the first forecast occupied/empty transition), giving $20^3=8000$ sequences rolled out through Model~02 in vectorised batches (mean 215~ms, p95 289~ms). Step~1 uses the larger of measured and forecast occupancy; later steps use Model~01. With $\Delta t_h=5/60$~h the cost is
+\begin{multline}
+J=\sum_{k=1}^{6}\Big[w_e \tfrac{P_k}{1000} + \mathbb{1}_{occ,k}\big(w_T (T_k-21.5)^2 + w_B v(T_k)^2 \\
++ w_C\big(\tfrac{(C_k-800)^+}{100}\big)^2 + w_{C2}\big(\tfrac{(C_k-1000)^+}{100}\big)^2\big) \\
++ (1-\mathbb{1}_{occ,k})\,w_B\,((16-T_k)^+)^2\Big]\Delta t_h + \sum_{\text{blocks}}\big(w_\Delta \Delta T_{set}^2 + w_D|\Delta D|\big)
+\end{multline}
+where $v(T)$ is the distance outside 20--24\degC, $w_e=1$, $w_T=0.5$, $w_B=20$, $w_C=0.5$, $w_{C2}=10$, $w_\Delta=0.002$ and $w_D=0.005$. The switching weights are small on purpose: an earlier, larger switching cost exceeded the one-step benefit of any damper change and locked the damper at its maximum in an empty room; a regression test now covers this.
 
-\subsection{Multi-Objective Cost Function}
-At each control invocation $k$, the optimizer searches for the control sequence $\mathbf{u}^* = \{u_0, u_1, \dots, u_{H-1}\}$ minimizing the cumulative cost function $J$:
+A dwell-time filter holds an action change for two control cycles (20~s) unless \cotwo{} exceeds 1100~ppm or an occupied room is below 18\degC. If the newest telemetry row is older than 30~s, the MPC is skipped and the controller commands 21\degC{} with damper~1 (Safe Fallback). The actuator controller clamps setpoints to 16--28\degC{} and the damper to 0--3 and rejects unknown rooms; it is a static guardrail, not a verified runtime-assurance (Simplex~\cite{sha2001using}) architecture.
 
-\begin{equation}
-J = \sum_{j=1}^{H} \Big[ w_e \cdot \frac{P_j}{1000} + w_c \cdot \Phi_T(T_j) \cdot \Omega_j + w_a \cdot \Phi_C(C_j) \cdot \Omega_j \Big] + w_{\Delta u} \cdot |\Delta u|
-\label{eq:cost}
-\end{equation}
+\section{Communication Protocols}
+MQTT~\cite{mqtt5} fans telemetry out from the gateway without coupling it to consumers; at QoS~0, readings published during a broker outage are lost, which is acceptable for 1~Hz state that is superseded a second later. Commands use REST~\cite{fielding2000architectural} because the controller needs an immediate explicit outcome (200 applied, 400 rejected, 502 BuildSim error) and setting a state is idempotent. The dashboard receives pushed state over WebSocket~\cite{rfc6455} (\texttt{/ws/telemetry}), which browsers support natively; MQTT in the browser would need an MQTT-over-WebSocket listener and a client library, and Server-Sent Events would suffice for one-way push but not for future operator commands on the same channel. The dashboard reconnects with exponential back-off and polls REST while disconnected.
 
-Where:
-\begin{itemize}
-    \item $P_j / 1000$ represents power draw in kilowatts ($w_e = 1.0$).
-    \item $\Phi_T(T_j)$ represents the ASHRAE~55 thermal comfort violation penalty:
-    \begin{equation}
-    \Phi_T(T) = \begin{cases}
-    (20.0 - T)^2, & \text{if } T < 20.0^\circ\text{C} \\
-    (T - 24.0)^2, & \text{if } T > 24.0^\circ\text{C} \\
-    0, & \text{otherwise}
-    \end{cases}
-    \end{equation}
-    \item $\Phi_C(C_j)$ represents the indoor air quality penalty for exceeding $1000\text{ ppm}$ ($w_a = 8.0$):
-    \begin{equation}
-    \Phi_C(C) = \max\left(0, \, \frac{C - 1000}{100}\right)^2
-    \end{equation}
-    \item $\Omega_j = (N_{\text{occ},j} + 0.1)$ represents dynamic occupancy weighting. When the room is unoccupied ($N_{\text{occ}} = 0$), comfort weights relax to 0.1, allowing the room to float into an energy-saving eco-setback ($18.0\text{--}21.5^\circ\text{C}$).
-    \item $w_{\Delta u} \cdot |\Delta u|$ applies an actuation switching penalty ($w_{\Delta u} = 1.5$) to discourage erratic adjustments.
-\end{itemize}
+\section{Evaluation}
+\subsection{Simulated Work Week}
+A Monday--Friday timetable drawn with a seed unseen by Model~01 (occupied 31.9\% of the time, peak 24 people) drives four controllers on identical physics, acting every 5~minutes: (1) fixed schedule, 22\degC/damper~2 from 06:00--22:00 and 16\degC/damper~0 otherwise; (2) rule-based, 21.5\degC/damper~2 when occupied and 18\degC/damper~0 when empty; (3) rule-based with demand-controlled ventilation (DCV), damper from measured \cotwo{}; (4) the MPC.
 
-\subsection{Anti-Chattering Dwell-Time Filter}
-To protect physical thermal valves and mechanical ventilation dampers from mechanical fatigue, the MPC service incorporates a dwell-time filter:
-\begin{equation}
-\Delta t_{\text{actuation}} = t_{\text{current}} - t_{\text{last\_change}} \ge 60.0\text{ s}
-\end{equation}
-If the optimizer selects a new setpoint before the 60-second dwell period elapses, the command is suppressed and the previous state is maintained, unless an emergency comfort violation occurs ($T < 18^\circ\text{C}$ or $\text{CO}_2 > 1100\text{ ppm}$ during occupancy).
-
-\subsection{Simplex Runtime Safety Supervisor}
-Following the Simplex architectural pattern for safe online control~\cite{sha2001using}, the untrusted optimizer output is intercepted by the deterministic Actuator Controller before reaching BuildSim:
-\begin{equation}
-u_{\text{clamped}} = \min\left(28.0, \, \max\left(16.0, \, u_{\text{set}}\right)\right)
-\end{equation}
-Any corrupted or malicious control input outside regulatory boundaries is clamped, logged, and audited.
-
----
-
-\section{Communication Protocol Trade-Off Analysis}
-
-A core design inquiry posed during the architectural proposal review was: \textit{"Why use WebSockets rather than alternatives like MQTT or REST at the edge?"} 
-
-To address this from an academic systems-engineering perspective, we evaluate the three protocols across edge CPS criteria in Table~\ref{tab:protocols}.
-
-\begin{table*}[t]
-\caption{Edge Communication Protocol Architectural Trade-off Matrix}
-\label{tab:protocols}
+\begin{table}[t]
+\caption{Simulated work week (38.3 occupied hours)}
+\label{tab:week}
 \centering
-\begin{tabular}{@{}p{3.2cm}p{4.2cm}p{4.2cm}p{4.2cm}@{}}
+\begin{tabular}{@{}lrrrr@{}}
 \toprule
-\textbf{Evaluation Dimension} & \textbf{MQTT (OASIS Standard)} & \textbf{HTTP/1.1 REST} & \textbf{WebSocket (RFC 6455)} \\ \midrule
-\textbf{Transport \& Framing} & TCP, binary framed, 2-byte header & TCP, ASCII text headers (0.5--1.5~KB) & TCP, framed bi-directional, 2--10 byte header \\
-\textbf{Architectural Pattern} & Publish/Subscribe via broker & Synchronous Request/Response (RPC) & Duplex point-to-point stream \\
-\textbf{Coupling Model} & Fully decoupled (Space, Time, Sync) & Tightly coupled client to endpoint IP/Port & Coupled connection endpoints \\
-\textbf{Quality of Service (QoS)} & Native QoS 0 (At most once), QoS 1 (At least once), QoS 2 (Exactly once) & Application-level retries required (HTTP 200/500 status semantics) & None native; application framing required \\
-\textbf{Edge Resource Footprint} & Extremely low CPU/RAM; ideal for embedded C/Go microcontrollers & Moderate overhead; connection teardown overhead if keep-alive disabled & High server RAM; each persistent socket maintains dedicated file descriptor \\
-\textbf{Optimal Role in System} & \textbf{IoT Sensor Telemetry Pipeline} & \textbf{Transactional Actuator Commands} & \textbf{Browser Digital Twin \& Dashboard Streaming} \\ \bottomrule
-\end{tabular}
-\end{table*}
-
-\subsection{Architectural Synthesis}
-Our design does not force a single protocol across all domains. Instead, we implement an optimal \textbf{hybrid architecture}:
-\begin{enumerate}
-    \item \textbf{MQTT for Ingestion:} Sensor gateways stream telemetry at 2~Hz to Mosquitto. MQTT's 2-byte fixed header minimizes network bandwidth, and the pub/sub pattern decouples data collection from analytical consumers. If the database drops, the broker buffers data without back-pressuring sensors.
-    \item \textbf{REST for Actuation:} Actuator commands require synchronous confirmation and transactional safety. REST (`POST /commands`) provides immediate HTTP status codes (`200 OK`, `400 Bad Request`) allowing the controller to verify that safety clamping succeeded.
-    \item \textbf{WebSockets for Browser Visualization:} WebSockets excel at streaming high-frequency state updates to client web viewports (such as the BuildSim 3D canvas and the live chart dashboard) without the polling overhead of HTTP GET.
-
----
-
-\section{Empirical Benchmarking \& Results}
-
-\subsection{Experimental Setup}
-The complete system was deployed on Docker Engine across a simulated test week. Outdoor ambient temperature was held at $12.0^\circ\text{C}$ (typical Swedish autumn). To establish an empirical benchmark, the parallel Baseline Controller executed the standard ASHRAE~90.1 commercial schedule ($22.0^\circ\text{C}$ and Damper Level 2 during operating hours 06:00--22:00) under identical weather and occupant loads.
-
-\subsection{Occupancy Injection Benchmarks}
-We evaluated three operational regimes:
-\begin{enumerate}
-    \item \textbf{Unoccupied Room ($N_{\text{occ}} = 0$):} The MPC controller entered an eco-setback mode ($21.5^\circ\text{C}$, Damper 1), consuming $70\text{ W}$ electrical power. In contrast, the baseline maintained active heating ($473.3\text{ W}$), achieving \textbf{85.2\% energy savings}.
-    \item \textbf{Small Seminar Group ($N_{\text{occ}} = 5$):} As 5 occupants entered Room A109, metabolic sensible heat pushed the room temperature naturally from $19.8^\circ\text{C}$ to $22.9^\circ\text{C}$. The MPC controller recognized that human body heat was sustaining thermal comfort, automatically lowering the heating setpoint to $20.5^\circ\text{C}$ and turning off electric heating elements ($350.0\text{ W}$ draw). The baseline thermostat, lacking occupancy awareness, kept heating actively ($473.3\text{ W}$). The MPC achieved \textbf{32.1\% to 34.7\% energy reduction} while maintaining comfort at $20.2\text{--}22.9^\circ\text{C}$ and $\text{CO}_2$ at $570\text{ ppm}$.
-    \item \textbf{Crowded Lecture ($N_{\text{occ}} = 15$):} With 15 occupants emitting $+1125\text{ W}$ of body heat, room temperature climbed to $27.3^\circ\text{C}$ and $\text{CO}_2$ rose rapidly. The MPC controller opened the ventilation damper to Level 2 and chilled the setpoint to $18.0^\circ\text{C}$ to purge excess thermal energy, stabilizing $\text{CO}_2$ at $870\text{ ppm}$ well below the hazardous $1000\text{ ppm}$ ceiling.
-\end{enumerate}
-
-\begin{table}[h]
-\caption{Empirical Performance Comparison: Smart MPC vs. Baseline}
-\label{tab:results}
-\centering
-\begin{tabular}{@{}lccc@{}}
-\toprule
-\textbf{Operational Metric} & \textbf{Baseline (Fixed)} & \textbf{Smart (MPC)} & \textbf{Delta / Savings} \\ \midrule
-Unoccupied Power Draw & 473.3 W & 70.0 W & \textbf{-85.2\%} \\
-Active Occupancy Power (5p) & 473.3 W & 350.0 W & \textbf{-34.7\%} \\
-Average Temp Violation ($<20^\circ$C) & 0.0 deg$\cdot$min & 0.0 deg$\cdot$min & Preserved \\
-Peak $\text{CO}_2$ (Active 5p) & 463 ppm & 570 ppm & $<1000$ ppm safe \\
-Cumulative Energy (Test Run) & 0.0097 kWh & 0.0063 kWh & \textbf{+34.7\% Saved} \\ \bottomrule
+ & Fixed & Rule & Rule+DCV & MPC \\ \midrule
+Energy (kWh) & 112.7 & 44.0 & 47.7 & 52.1 \\
+\quad occupied & 23.4 & 20.7 & 24.4 & 26.8 \\
+\quad empty & 89.3 & 23.3 & 23.3 & 25.2 \\
+In 20--24\degC{} (\%) & 100.0 & 99.7 & 99.7 & 99.8 \\
+\cotwo{} $>$1000 ppm (\%) & 27.9 & 27.9 & 12.7 & 0.2 \\
+\cotwo{} $>$800 ppm (\%) & 71.4 & 71.4 & 70.5 & 80.8 \\
+Action changes & 10 & 46 & 321 & 231 \\ \bottomrule
 \end{tabular}
 \end{table}
 
----
+Table~\ref{tab:week} shows that the MPC used 53.8\% less energy than the fixed schedule, almost entirely during empty periods (71.8\% less); while occupied it used 14.7\% more, ventilating to stay under 1000~ppm. It spent only 0.2\% of occupied time above 1000~ppm, far less than any other controller. The occupancy-reactive rules used less energy (the MPC used 18.4\% more than the rule-based controller and 9.1\% more than DCV) but exceeded the \cotwo{} limit for 27.9\% and 12.7\% of occupied time. Most of the saving against the fixed schedule therefore comes from occupancy awareness itself. The MPC spent 99.8\% of occupied time in the comfort band and changed actions 231 times.
 
-\section{Chaos Engineering \& Resilience Evaluation}
+\subsection{Live Closed Loop}
+An end-to-end test injects 10 people into A109 via BuildSim and checks that the MPC leaves eco setback within 45~s, that ingested rows carry the applied actuator state, and that one minute later the room is within 20--24\degC{} and below 1000~ppm. In the final run the MPC commanded 21.5\degC{}/damper~2 after 11~s, citing a predicted 21.4\degC{} and 707~ppm five minutes ahead; one minute later the room measured 21.3\degC{} and 847~ppm.
 
-Following the requirements of Course Notes 4 on resilience and runtime safety, we implemented an automated chaos test suite (`scripts/test_resilience.py`) that systematically triggers service failures. The resulting empirical Mean Time to Recovery (MTTR) is reported in Table~\ref{tab:resilience}.
-
-\begin{table}[h]
-\caption{Empirical Fault Injection \& Resilience Verification}
-\label{tab:resilience}
+\subsection{Fault Injection}
+\begin{table}[t]
+\caption{Fault injection results}
+\label{tab:faults}
 \centering
-\begin{tabular}{@{}p{2.8cm}p{3.2cm}cc@{}}
+\begin{tabular}{@{}p{0.36\linewidth}p{0.36\linewidth}r@{}}
 \toprule
-\textbf{Injected Fault} & \textbf{Observed Recovery Behavior} & \textbf{MTTR} & \textbf{Status} \\ \midrule
-\textbf{MQTT Broker Crash} & Mosquitto container restarted; sensor gateways and ingestors auto-reconnected via exponential backoff without packet loss & \textbf{1.05 s} & \textbf{PASS} \\ \midrule
-\textbf{Twin Memory Wipe} & BuildSim container restarted (RAM erased); simulator auto-seeding detected 404 and atomically restored Room A109 equipment & \textbf{15.07 s} & \textbf{PASS} \\ \midrule
-\textbf{Simplex Safety Clamp} & Adversarial setpoint ($48.0^\circ\text{C}$) injected; Simplex supervisor intercepted and clamped to $28.0^\circ\text{C}$ & \textbf{0.03 s} & \textbf{PASS} \\ \midrule
-\textbf{Autonomous Benchmarking} & Continuous telemetry validation; smart controller verified beating baseline energy & \textbf{0.01 s} & \textbf{PASS} \\ \bottomrule
+Fault & Behaviour & Recovery \\ \midrule
+MQTT broker restart & Clients reconnect; QoS~0 readings during the outage lost & 1.1~s \\
+BuildSim restart (state wipe) & Watchdog re-registers A109, telemetry resumes & 3.8~s \\
+Commands of 48 and 4\degC & Clamped to 28 and 16\degC & immediate \\
+Physics simulator stopped & Safe Fallback after 37.4~s & 10.0~s \\
+Controller process exit & Docker restarts it; actuators hold & 7.6~s \\ \bottomrule
 \end{tabular}
 \end{table}
+Table~\ref{tab:faults} summarises \texttt{scripts/test\_resilience.py}. BuildSim recovery depends on the watchdog's 15~s period and varied between runs. Go and Python unit tests (18 Python tests) cover the guardrail, ingestor validation and power model, SQLite migration, physics, MPC behaviour, both models and staleness detection.
 
-The zero-crash resilience is made possible by two architectural mechanisms:
-\begin{enumerate}
-    \item \textbf{Autonomous Self-Healing:} The Physical Simulator polls `GET /api/equipment/hvac-A109` every 15 ticks. If a 404 is returned (indicating a digital twin crash), it automatically re-executes `POST /api/equipment/bulk`, re-registering the 3 sensors and 2 actuators seamlessly.
-    \item \textbf{Broker Reconnection Handshake:} Sensor gateways use Paho MQTT's auto-reconnect handler with persistent client sessions (`clean_session=false`), allowing telemetry publication to resume within 1.05 seconds of broker recovery.
-\end{enumerate}
+\section{Limitations and Future Work}\label{sec:limits}
+(1) A single room with time-compressed dynamics: heating just in time costs almost the same as pre-heating, so occupancy forecasts mainly help ventilation; realistic time constants and multi-zone coupling would make prediction more valuable. (2) Both models are trained mostly on synthetic data from the same equations used for evaluation. (3) Constant outdoor temperature and no solar gains. (4) No ventilation heat recovery, which makes ventilation unusually expensive. (5) QoS~0 telemetry. (6) The guardrail is a static clamp. (7) The MPC switches actions often; a real installation needs a longer dwell time or stronger switching penalty. Relative to the proposal, multi-zone control, humidity sensing, a Parquet pipeline (replaced by SQLite with JSONL export) and dashboard heatmaps were not implemented.
 
----
-
-\section{Conclusion \& Future Work}
-
-This paper demonstrated the design, implementation, and empirical validation of an autonomous, multi-objective HVAC control system for the LTU A-House digital twin. By coupling first-principles thermodynamic and $\text{CO}_2$ modeling with Model Predictive Control and a Simplex safety supervisor, the system achieved a **32.1\% to 65.0\% reduction in electrical heating energy** while strictly preserving indoor environmental comfort. The microservice architecture proved highly resilient, achieving autonomous self-healing in under 16 seconds under catastrophic state wipe.
-
-Future extensions of this work include: (1) expanding the single-room thermal model to multi-zone coupling accounting for conductive wall exchange between adjacent rooms, and (2) deploying the Python MPC optimizer onto resource-constrained physical edge nodes (e.g., Raspberry Pi 5 or NVIDIA Jetson) to evaluate hardware power dissipation during mathematical optimization.
+\section{Conclusion}
+The system closes a sense--reason--act loop across eight containers, forecasts occupancy, predicts the room's response, optimises over 30 minutes, enforces safety limits, detects stale data and recovers from injected faults without intervention. It cut energy by 53.8\% against a fixed schedule and kept \cotwo{} above 1000~ppm for only 0.2\% of occupied time, while simpler occupancy-reactive rules used less energy at the cost of air quality. The value of predictive control depends on the room's time constants and on the chosen energy--air-quality trade-off, and a fair evaluation needs baselines stronger than a fixed schedule.
 
 \bibliographystyle{IEEEtran}
 \bibliography{references}
 
 \end{document}
-

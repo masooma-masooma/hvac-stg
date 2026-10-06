@@ -107,6 +107,10 @@ services:
       - BUILDSIM_URL=http://buildsim:9090
       - CONTROL_INTERVAL=10.0
       - TARGET_ROOM=A109
+    volumes:
+      - ./tests:/tests
+      - ./scripts:/scripts:ro
+      - ./data/benchmarks:/benchmarks
     restart: unless-stopped
     depends_on:
       - actuator-controller

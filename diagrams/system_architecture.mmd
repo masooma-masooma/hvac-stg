@@ -1,34 +1,35 @@
 flowchart TD
-    subgraph Environment ["Virtual Environment (Port 9090)"]
-        BuildSim["BuildSim Digital Twin<br/>(3D Building Simulator)"]
+    subgraph Environment ["Digital Twin (Port 9090)"]
+        BuildSim["BuildSim<br/>(in-memory A-House state, 3D view)"]
+        Sim["Physical Simulator (Go)<br/>(room physics, re-seeding)"]
     end
 
     subgraph EdgeLayer ["Edge Microservices (Go)"]
-        Sensors["Go Sensor Gateways<br/>(Temperature, CO2, Occupancy)"]
-        Actuators["Go Actuator Service<br/>(Dwell-Time & Safety Clamp)"]
+        Sensors["Sensor Gateway<br/>(temperature, CO2, occupancy at 2 Hz)"]
+        Actuators["Actuator Controller<br/>(safety guardrail clamp)"]
     end
 
     subgraph Messaging ["Telemetry Pipeline"]
-        Broker["Mosquitto MQTT Broker<br/>(Local Queue)"]
-        Pipeline["Python Pipeline Consumer<br/>& Data Quality Monitor"]
-        Store[("Local Time-Series Store<br/>SQLite / TimescaleDB & Parquet")]
+        Broker["Mosquitto MQTT Broker"]
+        Pipeline["Telemetry Ingestor (Go)<br/>validation, dedup, power model"]
+        Store[("SQLite WAL<br/>+ JSONL export")]
     end
 
     subgraph Intelligence ["Decision Engine (Python)"]
-        Controller["Autonomous MPC Controller<br/>(Occupancy Forecast & Energy Optimizer)"]
+        Controller["Smart Controller<br/>(Model 01 + Model 02 + MPC, Safe Fallback)"]
     end
 
     subgraph Visualization ["User Interface"]
-        Dashboard["Web Dashboard<br/>(Live Heatmaps & kWh Savings)"]
+        Dashboard["Web Dashboard<br/>(live kWh savings, MPC plan)"]
     end
 
-    BuildSim -->|"1. Poll State (REST)"| Sensors
-    Sensors -->|"2. Publish Telemetry"| Broker
-    Broker -->|"3. Ingest Stream"| Pipeline
+    Sim <-->|"REST"| BuildSim
+    BuildSim -->|"1. Poll sensors (REST)"| Sensors
+    Sensors -->|"2. Publish telemetry (MQTT)"| Broker
+    Broker -->|"3. Subscribe"| Pipeline
     Pipeline --> Store
-    Store -->|"Query Recent Window"| Controller
-    Controller -->|"4. Propose Setpoint (REST)"| Actuators
-    Actuators -->|"5. Apply Setpoint (REST)"| BuildSim
-    Store -->|"Stream Live State (WebSocket)"| Dashboard
-    BuildSim -.->|"3D Viewer Stream"| Dashboard
-
+    Store -->|"4. Recent window (REST)"| Controller
+    Controller -->|"5. Command (REST)"| Actuators
+    Actuators -->|"6. Apply setpoint/damper (REST)"| BuildSim
+    Controller -->|"Live state (WebSocket)"| Dashboard
+    BuildSim -.->|"3D viewer"| Dashboard

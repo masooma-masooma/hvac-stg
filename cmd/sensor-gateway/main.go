@@ -23,11 +23,16 @@ const (
 )
 
 type BuildSimSensor struct {
-	ID    string `json:"id"`
-	Type  string `json:"type"`
-	Value string `json:"value"`
-	Unit  string `json:"unit"`
+	ID        string    `json:"id"`
+	Type      string    `json:"type"`
+	Value     string    `json:"value"`
+	Unit      string    `json:"unit"`
+	Timestamp time.Time `json:"timestamp"` // when the physical simulator last wrote the value
 }
+
+// pollInterval is 500 ms (2 Hz). The physical simulator writes at 1 Hz, so the
+// ingestor drops readings whose sensor timestamp has not advanced.
+const pollInterval = 500 * time.Millisecond
 
 func main() {
 	baseURL := strings.TrimRight(os.Getenv("BUILDSIM_URL"), "/")
@@ -64,11 +69,12 @@ func main() {
 	}
 
 	httpClient := &http.Client{Timeout: 5 * time.Second}
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	sensors := []string{"A109-temp", "A109-co2", "A109-occ"}
 
+	published := 0
 	for range ticker.C {
 		var readings []models.TelemetryReading
 
@@ -83,6 +89,11 @@ func main() {
 				continue
 			}
 
+			// Keep the sensor's own timestamp so stale values stay detectable downstream.
+			ts := sensor.Timestamp.UTC()
+			if ts.IsZero() {
+				ts = time.Now().UTC()
+			}
 			reading := models.TelemetryReading{
 				Room:      roomName,
 				Level:     levelName,
@@ -90,7 +101,7 @@ func main() {
 				Type:      sensor.Type,
 				Value:     val,
 				Unit:      sensor.Unit,
-				Timestamp: time.Now().UTC(),
+				Timestamp: ts,
 			}
 			readings = append(readings, reading)
 
@@ -116,6 +127,10 @@ func main() {
 				case "occupancy":
 					occVal = r.Value
 				}
+			}
+			published++
+			if published%10 != 1 {
+				continue
 			}
 			log.Printf("[SensorGateway] Telemetry published -> Room %s: Temp=%.1f°C | CO2=%.0f ppm | Occ=%.0f",
 				roomName, tempVal, co2Val, occVal)

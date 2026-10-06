@@ -1,0 +1,104 @@
+{
+  "scenario": {
+    "description": "Simulated LTU work week (Mon-Fri) in Room A109, timetable with random lecture cancellations",
+    "week_start_local": "2026-10-05T00:00:00+02:00",
+    "days": 5,
+    "occupancy_seed": 2026,
+    "occupied_slots_pct": 31.9,
+    "peak_occupancy": 24,
+    "controller_interval_s": 300,
+    "physics_tick_s": 1,
+    "outdoor_temp_c": 12.0
+  },
+  "controllers": {
+    "fixed_schedule": {
+      "energy_kwh": 112.735,
+      "energy_occupied_kwh": 23.405,
+      "energy_unoccupied_kwh": 89.33,
+      "occupied_hours": 38.33,
+      "occupied_time_in_comfort_band_pct": 100.0,
+      "comfort_violation_degc_h": 0.0,
+      "occupied_time_co2_over_1000_pct": 27.86,
+      "occupied_time_co2_over_800_pct": 71.39,
+      "co2_over_1000_ppm_h": 599.62,
+      "action_changes": 10
+    },
+    "rule_based": {
+      "energy_kwh": 43.977,
+      "energy_occupied_kwh": 20.663,
+      "energy_unoccupied_kwh": 23.314,
+      "occupied_hours": 38.33,
+      "occupied_time_in_comfort_band_pct": 99.67,
+      "comfort_violation_degc_h": 0.108,
+      "occupied_time_co2_over_1000_pct": 27.86,
+      "occupied_time_co2_over_800_pct": 71.39,
+      "co2_over_1000_ppm_h": 599.62,
+      "action_changes": 46
+    },
+    "rule_based_dcv": {
+      "energy_kwh": 47.696,
+      "energy_occupied_kwh": 24.378,
+      "energy_unoccupied_kwh": 23.318,
+      "occupied_hours": 38.33,
+      "occupied_time_in_comfort_band_pct": 99.67,
+      "comfort_violation_degc_h": 0.108,
+      "occupied_time_co2_over_1000_pct": 12.73,
+      "occupied_time_co2_over_800_pct": 70.55,
+      "co2_over_1000_ppm_h": 250.66,
+      "action_changes": 321
+    },
+    "mpc": {
+      "energy_kwh": 52.06,
+      "energy_occupied_kwh": 26.834,
+      "energy_unoccupied_kwh": 25.226,
+      "occupied_hours": 38.33,
+      "occupied_time_in_comfort_band_pct": 99.83,
+      "comfort_violation_degc_h": 0.004,
+      "occupied_time_co2_over_1000_pct": 0.2,
+      "occupied_time_co2_over_800_pct": 80.76,
+      "co2_over_1000_ppm_h": 5.78,
+      "action_changes": 231
+    }
+  },
+  "savings_pct": {
+    "mpc_vs_fixed_total": 53.8,
+    "mpc_vs_fixed_unoccupied": 71.8,
+    "mpc_vs_fixed_occupied": -14.7,
+    "rule_based_vs_fixed_total": 61.0,
+    "mpc_vs_rule_based_total": -18.4,
+    "rule_based_dcv_vs_fixed_total": 57.7,
+    "mpc_vs_rule_based_dcv_total": -9.1
+  },
+  "model_01_forecast_on_benchmark_week": {
+    "mae_persons_10_to_30_min": 1.047,
+    "bias_persons": -0.21
+  },
+  "mpc_solve_time_ms": {
+    "mean": 215.0,
+    "p95": 289.2
+  },
+  "models": {
+    "model_01": {
+      "algorithm": "RandomForestRegressor (n_estimators=60, max_depth=14)",
+      "test_r2": 0.9552,
+      "test_rmse_persons": 1.262,
+      "persistence_rmse_persons": 3.605,
+      "samples": 96768,
+      "trained_at": "2026-10-06T12:35:05.889760+02:00"
+    },
+    "model_02": {
+      "algorithm": "HistGradientBoostingRegressor x2 (dT, dCO2) on physics-informed features",
+      "samples_total": 24511,
+      "samples_logged_telemetry": 4511,
+      "samples_synthetic": 20000,
+      "test_r2_temp": 0.9967,
+      "test_rmse_temp_c": 0.2618,
+      "test_r2_co2": 0.9993,
+      "test_rmse_co2_ppm": 14.25,
+      "trained_at": "2026-10-06T11:00:48.906333+00:00",
+      "test_rmse_temp_c_logged_only": 0.0335,
+      "test_samples_logged_only": 885
+    }
+  },
+  "generated_at": "2026-10-06T11:06:37.172535+00:00"
+}

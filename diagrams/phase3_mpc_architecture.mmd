@@ -1,43 +1,48 @@
 flowchart TD
     subgraph Environment ["Cyber-Physical Building Twin"]
         BS["BuildSim Server (:9090)"]
-        PS["Physical Simulator (ODE Physics)"]
-        SG["Sensor Gateway (MQTT Publisher)"]
+        PS["Physical Simulator (1 s Euler physics, self-healing)"]
+        SG["Sensor Gateway (2 Hz, MQTT publisher)"]
     end
 
-    subgraph DataPipeline ["Storage & Telemetry (Phases 1 & 2)"]
-        MB["Mosquitto MQTT Broker (:1883)"]
-        TI["Telemetry Ingestor & DB (:8081)"]
+    subgraph DataPipeline ["Storage & Telemetry"]
+        MB["Mosquitto MQTT Broker (:1883, QoS 0)"]
+        TI["Telemetry Ingestor (:8081)<br/>range checks, dedup, live actuator state, power, SQLite WAL"]
     end
 
     subgraph SmartMPC ["Smart Controller Service (:8082)"]
-        State["Current State Estimator (T, CO2, Occ)"]
-        Dyn["Thermodynamic & IAQ Model (ASHRAE 55)"]
-        MPC["MPC Horizon Optimizer (H = 6 Steps)"]
-        Dwell["Dwell-Time Anti-Chattering Filter"]
-        Base["Virtual Baseline Comparator (ASHRAE 90.1)"]
-        CompAPI["Comparison & Trajectory API (:8082)"]
+        State["State + staleness check (> 30 s)"]
+        Safe["Safe Fallback (21 °C, damper 1)"]
+        M1["Model 01: Random Forest occupancy forecast (5-30 min)"]
+        M2["Model 02: gradient-boosted dT / dCO2 predictor"]
+        MPC["MPC: 6 x 5 min, 3 move blocks, 8000 sequences"]
+        Dwell["Dwell-time filter (2 cycles, emergency bypass)"]
+        Base["Fixed-schedule baseline twin"]
+        CompAPI["REST API + WebSocket /ws/telemetry"]
     end
 
     subgraph ActuationPlane ["Control Actuation Plane"]
         AC["Actuator Controller (:8080)"]
-        Clamp["Simplex Safety Guardrail (16°C - 28°C)"]
+        Clamp["Deterministic Safety Guardrail (16-28 °C, damper 0-3)"]
     end
 
-    BS <--> PS
-    PS --> BS
+    PS -->|"PUT sensor values"| BS
+    BS -->|"actuator state, occupancy"| PS
     BS --> SG
-    SG -->|"MQTT Publish"| MB
+    SG -->|"MQTT publish"| MB
     MB --> TI
+    TI -->|"GET /api/actuators"| BS
     TI -->|"GET /api/history"| State
-    State --> MPC
-    Dyn --> MPC
-    MPC -->|"Optimal Setpoint & Damper"| Dwell
+    State -->|"stale"| Safe
+    State -->|"fresh"| MPC
+    M1 --> MPC
+    M2 --> MPC
+    MPC -->|"first action"| Dwell
     Dwell -->|"POST /commands"| AC
+    Safe -->|"POST /commands"| AC
     AC --> Clamp
     Clamp -->|"PUT /api/actuators"| BS
 
     State --> Base
     MPC --> CompAPI
     Base --> CompAPI
-

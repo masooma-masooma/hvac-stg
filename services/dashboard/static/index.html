@@ -27,6 +27,9 @@
     .badge { padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
     .badge-green { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
     .badge-blue { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
+    .badge-amber { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-red { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
+    .stale-banner { display: none; margin-bottom: 16px; padding: 10px 14px; border-radius: 8px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #fca5a5; font-size: 13px; }
 
     .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
     .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 18px; backdrop-filter: blur(12px); }
@@ -63,16 +66,18 @@
       <p style="color: var(--text-muted); font-size: 13px; margin-top: 4px;">D7065E — Embedded Intelligence at the Edge | Room A109 Digital Twin</p>
     </div>
     <div class="badges">
-      <span class="badge badge-green">● 7 Containers Active</span>
-      <span class="badge badge-blue">MPC Horizon: 30 Min</span>
-      <span class="badge badge-green">Auto-Seeding Active</span>
+      <span class="badge badge-blue" id="transport-badge">Connecting…</span>
+      <span class="badge badge-green" id="mode-badge">MPC status --</span>
+      <span class="badge badge-blue">MPC Horizon: 6 × 5 min</span>
     </div>
   </div>
+
+  <div class="stale-banner" id="stale-banner">No update from the smart controller for more than 5 seconds. Values shown may be out of date.</div>
 
   <!-- KPI Cards -->
   <div class="kpi-grid">
     <div class="card savings-card">
-      <div class="card-label">Energy Saved vs. Baseline</div>
+      <div class="card-label">Energy Saved vs. Fixed-Schedule Baseline (live)</div>
       <div class="card-value savings-val" id="savings-pct">--%</div>
       <div class="card-sub" id="savings-kwh">0.0000 kWh saved</div>
     </div>
@@ -80,7 +85,7 @@
     <div class="card">
       <div class="card-label">Indoor Climate (Room A109)</div>
       <div class="card-value" id="current-temp">--°C</div>
-      <div class="card-sub">Target Setpoint: <span id="current-setpoint" style="color:#fff; font-weight:600;">--°C</span></div>
+      <div class="card-sub">Applied Setpoint: <span id="current-setpoint" style="color:#fff; font-weight:600;">--°C</span></div>
     </div>
 
     <div class="card">
@@ -106,7 +111,7 @@
     </div>
 
     <div class="card">
-      <div class="card-label">MPC 30-Minute Lookahead Horizon (Predicted Trajectory)</div>
+      <div class="card-label">MPC 30-Minute Plan: Model 02 Temperature &amp; Model 01 Occupancy Forecast</div>
       <div class="chart-container">
         <canvas id="mpcChart"></canvas>
       </div>
@@ -123,13 +128,13 @@
         <button onclick="setOccupancy(0)">Empty Room (0p)</button>
         <button onclick="setOccupancy(5)">Small Group (5p)</button>
         <button onclick="setOccupancy(15)">Crowded Lecture (15p)</button>
-        <button class="btn-warn" onclick="testChaos()">⚡ Trigger Chaos Test</button>
+        <button class="btn-warn" onclick="testGuardrail()">⚡ Test Safety Guardrail (45°C)</button>
         <button style="background: rgba(34, 197, 94, 0.2); color: #4ade80; border-color: rgba(34, 197, 94, 0.4);" onclick="resetBenchmarks()">🔄 Reset Benchmarks</button>
       </div>
 
       <div style="margin-top: 16px; font-size: 12px; color: var(--text-muted);">
-        BuildSim 3D Viewer: <a href="http://localhost:9090" target="_blank" style="color: var(--accent-blue); text-decoration: none; font-weight:600;">http://localhost:9090 ↗</a> &nbsp;|&nbsp; 
-        SQLite API: <a href="http://localhost:8081/api/stats?room=A109" target="_blank" style="color: var(--accent-blue); text-decoration: none; font-weight:600;">Port 8081 ↗</a>
+        BuildSim 3D Viewer: <a id="link-buildsim" href="#" target="_blank" style="color: var(--accent-blue); text-decoration: none; font-weight:600;">Port 9090 ↗</a> &nbsp;|&nbsp; 
+        SQLite API: <a id="link-ingestor" href="#" target="_blank" style="color: var(--accent-blue); text-decoration: none; font-weight:600;">Port 8081 ↗</a>
       </div>
     </div>
 

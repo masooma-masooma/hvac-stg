@@ -23,6 +23,8 @@ type RoomTelemetrySnapshot struct {
 	CO2         float64   `json:"co2"`
 	Occupancy   int       `json:"occupancy"`
 	PowerW      float64   `json:"power_w"`
+	Setpoint    *float64  `json:"setpoint"` // live actuator state when the sample was ingested (nil for legacy rows)
+	Damper      *int      `json:"damper"`
 }
 
 // ActuatorCommand represents a command dispatched to the actuator service

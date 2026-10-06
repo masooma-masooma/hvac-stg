@@ -75,18 +75,59 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("failed executing schema: %w", err)
 	}
 
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	log.Printf("[SQLiteStore] Database initialized successfully at %s (WAL mode active)", dbPath)
 	return &SQLiteStore{db: db}, nil
 }
 
+// migrate adds the actuator-state columns to databases created by older versions.
+func migrate(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(telemetry);")
+	if err != nil {
+		return fmt.Errorf("failed reading telemetry schema: %w", err)
+	}
+	existing := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, colType string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	rows.Close()
+
+	for _, col := range []struct{ name, ddl string }{
+		{"setpoint", "ALTER TABLE telemetry ADD COLUMN setpoint REAL;"},
+		{"damper", "ALTER TABLE telemetry ADD COLUMN damper INTEGER;"},
+	} {
+		if !existing[col.name] {
+			if _, err := db.Exec(col.ddl); err != nil {
+				return fmt.Errorf("failed adding column %s: %w", col.name, err)
+			}
+			log.Printf("[SQLiteStore] Migrated telemetry table: added column %s", col.name)
+		}
+	}
+	return nil
+}
+
+// timestampLayout has a fixed width so stored timestamps sort lexicographically.
+const timestampLayout = "2006-01-02T15:04:05.000Z"
+
 // InsertSnapshot logs an incoming room snapshot and estimated instant power draw
 func (s *SQLiteStore) InsertSnapshot(r *models.RoomTelemetrySnapshot) error {
 	query := `
-	INSERT INTO telemetry (timestamp, level, room, temperature, co2, occupancy, power_w)
-	VALUES (?, ?, ?, ?, ?, ?, ?);
+	INSERT INTO telemetry (timestamp, level, room, temperature, co2, occupancy, power_w, setpoint, damper)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
-	ts := r.Timestamp.UTC().Format(time.RFC3339)
-	res, err := s.db.Exec(query, ts, r.Level, r.Room, r.Temperature, r.CO2, r.Occupancy, r.PowerW)
+	ts := r.Timestamp.UTC().Format(timestampLayout)
+	res, err := s.db.Exec(query, ts, r.Level, r.Room, r.Temperature, r.CO2, r.Occupancy, r.PowerW, r.Setpoint, r.Damper)
 	if err != nil {
 		return err
 	}
@@ -111,10 +152,10 @@ func (s *SQLiteStore) GetRecentTelemetry(room string, minutes int) ([]models.Roo
 	if minutes <= 0 {
 		minutes = 30
 	}
-	cutoff := time.Now().UTC().Add(-time.Duration(minutes) * time.Minute).Format(time.RFC3339)
+	cutoff := time.Now().UTC().Add(-time.Duration(minutes) * time.Minute).Format(timestampLayout)
 
 	query := `
-	SELECT id, timestamp, level, room, temperature, co2, occupancy, power_w
+	SELECT id, timestamp, level, room, temperature, co2, occupancy, power_w, setpoint, damper
 	FROM telemetry
 	WHERE room = ? AND timestamp >= ?
 	ORDER BY timestamp ASC;
@@ -130,8 +171,18 @@ func (s *SQLiteStore) GetRecentTelemetry(room string, minutes int) ([]models.Roo
 	for rows.Next() {
 		var rec models.RoomTelemetrySnapshot
 		var tsStr string
-		if err := rows.Scan(&rec.ID, &tsStr, &rec.Level, &rec.Room, &rec.Temperature, &rec.CO2, &rec.Occupancy, &rec.PowerW); err != nil {
+		var setpoint sql.NullFloat64
+		var damper sql.NullInt64
+		if err := rows.Scan(&rec.ID, &tsStr, &rec.Level, &rec.Room, &rec.Temperature, &rec.CO2, &rec.Occupancy, &rec.PowerW, &setpoint, &damper); err != nil {
 			return nil, err
+		}
+		if setpoint.Valid {
+			v := setpoint.Float64
+			rec.Setpoint = &v
+		}
+		if damper.Valid {
+			v := int(damper.Int64)
+			rec.Damper = &v
 		}
 		rec.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
 		records = append(records, rec)
@@ -151,25 +202,34 @@ func (s *SQLiteStore) GetRoomStats(room string) (map[string]interface{}, error) 
 		COALESCE(AVG(co2), 0.0),
 		COALESCE(MIN(co2), 0.0),
 		COALESCE(MAX(co2), 0.0),
-		COALESCE(AVG(power_w), 0.0),
-		COALESCE(SUM(power_w), 0.0)
+		COALESCE(AVG(power_w), 0.0)
 	FROM telemetry
 	WHERE room = ?;
+	`
+
+	// Energy = sum of power x time to the next sample; gaps longer than 5 s
+	// (service outages) are not counted.
+	energyQuery := `
+	SELECT COALESCE(SUM(power_w * MIN(dt, 5.0)), 0.0) FROM (
+		SELECT power_w,
+		       (julianday(LEAD(timestamp) OVER (ORDER BY timestamp, id)) - julianday(timestamp)) * 86400.0 AS dt
+		FROM telemetry WHERE room = ?
+	) WHERE dt IS NOT NULL AND dt >= 0;
 	`
 
 	var count int
 	var avgTemp, minTemp, maxTemp float64
 	var avgCO2, minCO2, maxCO2 float64
-	var avgPower, sumPower float64
+	var avgPower, energyWs float64
 
-	err := s.db.QueryRow(query, room).Scan(&count, &avgTemp, &minTemp, &maxTemp, &avgCO2, &minCO2, &maxCO2, &avgPower, &sumPower)
+	err := s.db.QueryRow(query, room).Scan(&count, &avgTemp, &minTemp, &maxTemp, &avgCO2, &minCO2, &maxCO2, &avgPower)
 	if err != nil {
 		return nil, err
 	}
-
-	// Assuming 2-second sampling interval: each row represents 2 seconds of power.
-	// Energy (kWh) = (Sum(power_w) * 2 seconds) / (3600 seconds/hr * 1000 W/kW)
-	energyKWh := (sumPower * 2.0) / 3600000.0
+	if err := s.db.QueryRow(energyQuery, room).Scan(&energyWs); err != nil {
+		return nil, err
+	}
+	energyKWh := energyWs / 3600000.0
 
 	return map[string]interface{}{
 		"room":             room,

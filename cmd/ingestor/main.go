@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -18,12 +20,47 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
+// Power model constants. Must match services/smart-controller/models/dynamics.py.
+const (
+	ambientTemp    = 12.0
+	basePowerW     = 25.0
+	fanPowerW      = 45.0   // per damper level
+	wattsPerRate   = 8750.0 // W per °C/s of heating (= 350 W per °C of lift)
+	maxHeaterW     = 2500.0
+	kHVAC          = 0.04
+	kEnvelope      = 0.005
+	kVentThermal   = 0.008
+	thermostatBand = 0.5
+	kOccHeat       = 0.01
+	actuatorMaxAge = 30 * time.Second // reuse a cached actuator read for at most this long
+)
+
+// Sensor plausibility limits; snapshots outside them are rejected, not stored.
+const (
+	minTempC     = -20.0
+	maxTempC     = 60.0
+	minCO2ppm    = 300.0
+	maxCO2ppm    = 5000.0
+	maxOccupancy = 200
+)
+
+type actuatorState struct {
+	setpoint  float64
+	damper    int
+	fetchedAt time.Time
+}
+
 type IngestorService struct {
-	store        *storage.SQLiteStore
-	buildsimURL  string
-	mu           sync.RWMutex
-	lastSetpoint float64
-	lastDamper   int
+	store       *storage.SQLiteStore
+	buildsimURL string
+	httpClient  *http.Client
+	mu          sync.Mutex
+	actuators   map[string]actuatorState
+	lastStored  map[string]time.Time
+	accepted    uint64
+	rejected    uint64
+	duplicates  uint64
+	lastReject  string
 }
 
 func main() {
@@ -55,10 +92,11 @@ func main() {
 	defer store.Close()
 
 	svc := &IngestorService{
-		store:        store,
-		buildsimURL:  buildsimURL,
-		lastSetpoint: 21.0,
-		lastDamper:   1,
+		store:       store,
+		buildsimURL: strings.TrimRight(buildsimURL, "/"),
+		httpClient:  &http.Client{Timeout: 2 * time.Second},
+		actuators:   map[string]actuatorState{},
+		lastStored:  map[string]time.Time{},
 	}
 
 	// 2. Connect to MQTT Broker
@@ -115,10 +153,9 @@ func main() {
 }
 
 func (svc *IngestorService) handleTelemetryMessage(client mqtt.Client, msg mqtt.Message) {
-	// The sensor gateway sends []models.TelemetryReading on bundle topic
+	// The sensor gateway sends []models.TelemetryReading on the bundle topic
 	var readings []models.TelemetryReading
 	if err := json.Unmarshal(msg.Payload(), &readings); err != nil {
-		// Single reading fallback
 		var single models.TelemetryReading
 		if err2 := json.Unmarshal(msg.Payload(), &single); err2 != nil {
 			log.Printf("[Ingestor] Invalid JSON on topic %s: %v", msg.Topic(), err)
@@ -126,19 +163,61 @@ func (svc *IngestorService) handleTelemetryMessage(client mqtt.Client, msg mqtt.
 		}
 		readings = []models.TelemetryReading{single}
 	}
-
 	if len(readings) == 0 {
 		return
 	}
 
-	snapshot := models.RoomTelemetrySnapshot{
-		Timestamp: time.Now().UTC(),
-		Room:      readings[0].Room,
-		Level:     readings[0].Level,
+	snapshot, seen := BuildSnapshot(readings)
+	if err := ValidateSnapshot(snapshot, seen); err != nil {
+		svc.mu.Lock()
+		svc.rejected++
+		svc.lastReject = err.Error()
+		svc.mu.Unlock()
+		log.Printf("[Ingestor] Rejected snapshot for %s: %v", snapshot.Room, err)
+		return
 	}
 
+	// The gateway polls at 2 Hz while the simulator writes at 1 Hz: only store
+	// snapshots whose sensor timestamp has advanced. Frozen sensors therefore stop
+	// producing rows, which the controller detects as stale telemetry.
+	svc.mu.Lock()
+	if last, ok := svc.lastStored[snapshot.Room]; ok && !snapshot.Timestamp.After(last) {
+		svc.duplicates++
+		svc.mu.Unlock()
+		return
+	}
+	svc.lastStored[snapshot.Room] = snapshot.Timestamp
+	svc.mu.Unlock()
+
+	if setpoint, damper, ok := svc.currentActuatorState(snapshot.Room); ok {
+		snapshot.Setpoint = &setpoint
+		snapshot.Damper = &damper
+		snapshot.PowerW = CalculatePowerW(setpoint, damper, snapshot.Temperature, snapshot.Occupancy)
+	} else {
+		log.Printf("[Ingestor] Actuator state for %s unknown; storing snapshot without power estimate", snapshot.Room)
+	}
+
+	if err := svc.store.InsertSnapshot(snapshot); err != nil {
+		log.Printf("[Ingestor] DB Insert error: %v", err)
+		return
+	}
+	svc.mu.Lock()
+	svc.accepted++
+	n := svc.accepted
+	svc.mu.Unlock()
+	if n%10 == 1 {
+		log.Printf("[Ingestor] Persisted %s/%s -> Temp=%.1f°C | CO2=%.0f ppm | Occ=%d | Power=%.1f W",
+			snapshot.Level, snapshot.Room, snapshot.Temperature, snapshot.CO2, snapshot.Occupancy, snapshot.PowerW)
+	}
+}
+
+// BuildSnapshot merges a reading bundle into one room snapshot. The snapshot is
+// stamped with the oldest sensor timestamp so its age is never understated.
+func BuildSnapshot(readings []models.TelemetryReading) (*models.RoomTelemetrySnapshot, map[string]bool) {
+	snapshot := &models.RoomTelemetrySnapshot{Room: readings[0].Room, Level: readings[0].Level}
+	seen := map[string]bool{}
 	for _, r := range readings {
-		if !r.Timestamp.IsZero() {
+		if !r.Timestamp.IsZero() && (snapshot.Timestamp.IsZero() || r.Timestamp.Before(snapshot.Timestamp)) {
 			snapshot.Timestamp = r.Timestamp
 		}
 		switch r.Type {
@@ -148,40 +227,105 @@ func (svc *IngestorService) handleTelemetryMessage(client mqtt.Client, msg mqtt.
 			snapshot.CO2 = r.Value
 		case "occupancy":
 			snapshot.Occupancy = int(r.Value)
+		default:
+			continue
 		}
+		seen[r.Type] = true
 	}
-
-	snapshot.PowerW = svc.calculatePowerW(&snapshot)
-
-	if err := svc.store.InsertSnapshot(&snapshot); err != nil {
-		log.Printf("[Ingestor] DB Insert error: %v", err)
-	} else {
-		log.Printf("[Ingestor] Persisted %s/%s -> Temp=%.1f°C | CO2=%.0f ppm | Occ=%d | Power=%.1f W",
-			snapshot.Level, snapshot.Room, snapshot.Temperature, snapshot.CO2, snapshot.Occupancy, snapshot.PowerW)
+	if snapshot.Timestamp.IsZero() {
+		snapshot.Timestamp = time.Now().UTC()
 	}
+	return snapshot, seen
 }
 
-// calculatePowerW models electrical power draw in Watts
-// Base standby (25W) + Fan power (45W per damper level) + Proportional heating (350W per °C below target)
-func (svc *IngestorService) calculatePowerW(s *models.RoomTelemetrySnapshot) float64 {
-	basePower := 25.0
-	fanPower := float64(svc.lastDamper) * 45.0
-
-	heatingPower := 0.0
-	tempDiff := svc.lastSetpoint - s.Temperature
-	if tempDiff > 0 {
-		heatingPower = tempDiff * 350.0 // 350 W per degree of heating lift
-		if heatingPower > 2500.0 {
-			heatingPower = 2500.0 // Max radiator power 2.5 kW
+// ValidateSnapshot rejects incomplete bundles and physically implausible values.
+func ValidateSnapshot(s *models.RoomTelemetrySnapshot, seen map[string]bool) error {
+	for _, required := range []string{"temperature", "co2", "occupancy"} {
+		if !seen[required] {
+			return fmt.Errorf("missing %s reading", required)
 		}
 	}
+	if s.Temperature < minTempC || s.Temperature > maxTempC {
+		return fmt.Errorf("temperature %.1f°C outside [%.0f, %.0f]", s.Temperature, minTempC, maxTempC)
+	}
+	if s.CO2 < minCO2ppm || s.CO2 > maxCO2ppm {
+		return fmt.Errorf("CO2 %.0f ppm outside [%.0f, %.0f]", s.CO2, minCO2ppm, maxCO2ppm)
+	}
+	if s.Occupancy < 0 || s.Occupancy > maxOccupancy {
+		return fmt.Errorf("occupancy %d outside [0, %d]", s.Occupancy, maxOccupancy)
+	}
+	return nil
+}
 
-	return basePower + fanPower + heatingPower
+// currentActuatorState reads the live setpoint and damper from BuildSim, falling
+// back to the last successful read if it is recent enough.
+func (svc *IngestorService) currentActuatorState(room string) (float64, int, bool) {
+	setpoint, errSp := svc.readActuator(room + "-setpoint")
+	damper, errD := svc.readActuator(room + "-damper")
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	if errSp == nil && errD == nil {
+		st := actuatorState{setpoint: setpoint, damper: int(damper), fetchedAt: time.Now()}
+		svc.actuators[room] = st
+		return st.setpoint, st.damper, true
+	}
+	if st, ok := svc.actuators[room]; ok && time.Since(st.fetchedAt) < actuatorMaxAge {
+		return st.setpoint, st.damper, true
+	}
+	return 0, 0, false
+}
+
+func (svc *IngestorService) readActuator(id string) (float64, error) {
+	resp, err := svc.httpClient.Get(fmt.Sprintf("%s/api/actuators/%s", svc.buildsimURL, id))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("BuildSim returned %s for %s", resp.Status, id)
+	}
+	var body struct {
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return 0, err
+	}
+	return strconv.ParseFloat(body.State, 64)
+}
+
+// CalculatePowerW returns the electrical power draw (W) of Room A109's HVAC:
+// 25 W standby + 45 W per damper level + radiator heat. The radiator thermostat
+// delivers K_HVAC*(setpoint - T) plus whatever offsets envelope and ventilation
+// losses minus occupant gains (fading out above the setpoint), priced at 350 W
+// per °C of lift, capped at 2.5 kW.
+func CalculatePowerW(setpoint float64, damper int, temperature float64, occupancy int) float64 {
+	loss := (kEnvelope + kVentThermal*float64(damper)) * (temperature - ambientTemp)
+	gain := kOccHeat * float64(occupancy)
+	compensation := math.Max(0, math.Min(1, 1-(temperature-setpoint)/thermostatBand))
+	demand := kHVAC*(setpoint-temperature) + compensation*(loss-gain)
+	heaterW := math.Max(0, math.Min(demand*wattsPerRate, maxHeaterW))
+	return basePowerW + fanPowerW*float64(damper) + heaterW
+}
+
+func (svc *IngestorService) counters() map[string]interface{} {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	return map[string]interface{}{
+		"accepted_snapshots":  svc.accepted,
+		"rejected_snapshots":  svc.rejected,
+		"duplicate_snapshots": svc.duplicates,
+		"last_reject_reason":  svc.lastReject,
+	}
 }
 
 func (svc *IngestorService) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "UP", "service": "telemetry-ingestor"})
+	resp := map[string]interface{}{"status": "UP", "service": "telemetry-ingestor"}
+	for k, v := range svc.counters() {
+		resp[k] = v
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (svc *IngestorService) handleHistory(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +366,7 @@ func (svc *IngestorService) handleStats(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	stats["data_quality"] = svc.counters()
 	json.NewEncoder(w).Encode(stats)
 }
 

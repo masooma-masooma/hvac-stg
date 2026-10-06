@@ -1,0 +1,23 @@
+{
+  "model_01_occupancy_forecaster": {
+    "algorithm": "RandomForestRegressor (n_estimators=60, max_depth=14)",
+    "test_r2": 0.9552,
+    "test_rmse_persons": 1.262,
+    "persistence_rmse_persons": 3.605,
+    "samples": 96768,
+    "trained_at": "2026-10-06T13:00:52.520398+02:00"
+  },
+  "model_02_thermal_predictor": {
+    "algorithm": "HistGradientBoostingRegressor x2 (dT, dCO2) on physics-informed features",
+    "samples_total": 24516,
+    "samples_logged_telemetry": 4516,
+    "samples_synthetic": 20000,
+    "test_r2_temp": 0.9967,
+    "test_rmse_temp_c": 0.264,
+    "test_r2_co2": 0.9993,
+    "test_rmse_co2_ppm": 13.66,
+    "trained_at": "2026-10-06T11:00:53.925461+00:00",
+    "test_rmse_temp_c_logged_only": 0.0334,
+    "test_samples_logged_only": 886
+  }
+}

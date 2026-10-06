@@ -1,27 +1,35 @@
-[
-  {
-    "test": "Broker Crash Recovery",
-    "status": "PASS",
-    "mttr_seconds": 0.75,
-    "details": "MQTT connection re-established; telemetry stream resumed. Telemetry emitted at QoS 0 during outage dropped as expected."
-  },
-  {
-    "test": "Digital Twin Self-Healing",
-    "status": "PASS",
-    "mttr_seconds": 3.88,
-    "details": "Simulator watchdog detected 404 and autonomously re-registered Room A109 equipment."
-  },
-  {
-    "test": "Safety Guardrail Clamping",
-    "status": "PASS",
-    "mttr_seconds": 0.02,
-    "details": "48.0\u00b0C clamped to 28.0\u00b0C and 4.0\u00b0C clamped to 16.0\u00b0C by safety guardrail."
-  },
-  {
-    "evaluation": "Comparative Baseline Benchmark",
-    "status": "FAIL",
-    "energy_savings_percentage": -148.6,
-    "comfort_preserved": false,
-    "details": "Smart MPC saved -148.6% energy over baseline with comfort preserved."
-  }
-]
+{
+  "generated_at": "2026-10-06T10:46:50.987487+00:00",
+  "results": [
+    {
+      "test": "MQTT Broker Restart",
+      "status": "PASS",
+      "recovery_seconds": 1.1,
+      "details": "Gateway and ingestor reconnected; first telemetry row stamped after the broker came back. Readings published during the outage were dropped (QoS 0)."
+    },
+    {
+      "test": "BuildSim Restart Self-Healing",
+      "status": "PASS",
+      "recovery_seconds": 3.76,
+      "details": "Simulator watchdog re-registered A109 equipment after 2.1s; telemetry flowing again after 3.8s."
+    },
+    {
+      "test": "Safety Guardrail Clamping",
+      "status": "PASS",
+      "recovery_seconds": null,
+      "details": "48.0°C request clamped to 28.0°C and 4.0°C request clamped to 16.0°C by the deterministic guardrail. The MPC overwrites the test setpoint on its next cycle."
+    },
+    {
+      "test": "Stale Telemetry Safe Fallback",
+      "status": "PASS",
+      "recovery_seconds": 10.03,
+      "details": "Frozen sensors detected and Safe Fallback (setpoint 21.0, damper 1) entered 37.4s after the simulator stopped (threshold 30s + up to one 10s control cycle); MPC resumed 10.0s after restart."
+    },
+    {
+      "test": "Smart Controller Restart",
+      "status": "PASS",
+      "recovery_seconds": 7.62,
+      "details": "Container restart count 0 -> 1; actuators held their last setpoint during the outage and the MPC resumed dispatching (includes model loading and the 5s start-up delay)."
+    }
+  ]
+}

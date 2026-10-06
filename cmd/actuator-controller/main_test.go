@@ -34,52 +34,52 @@ func TestActuatorController_ClampValidation(t *testing.T) {
 	}
 
 	tests := []struct {
-		name               string
-		inputSetpoint      *float64
-		inputDamper        *int
+		name                string
+		inputSetpoint       *float64
+		inputDamper         *int
 		expectedSetpointMsg string
 		expectedDamperMsg   string
-		expectedStatus     int
+		expectedStatus      int
 	}{
 		{
-			name:               "Normal valid command within safety bounds",
-			inputSetpoint:      floatPtr(22.0),
-			inputDamper:        intPtr(2),
+			name:                "Normal valid command within safety bounds",
+			inputSetpoint:       floatPtr(22.0),
+			inputDamper:         intPtr(2),
 			expectedSetpointMsg: "Setpoint=22.0°C",
 			expectedDamperMsg:   "Damper=2",
-			expectedStatus:     http.StatusOK,
+			expectedStatus:      http.StatusOK,
 		},
 		{
-			name:               "Under-temperature clamp (10.0°C -> 16.0°C)",
-			inputSetpoint:      floatPtr(10.0),
-			inputDamper:        intPtr(1),
+			name:                "Under-temperature clamp (10.0°C -> 16.0°C)",
+			inputSetpoint:       floatPtr(10.0),
+			inputDamper:         intPtr(1),
 			expectedSetpointMsg: "Setpoint=16.0°C",
 			expectedDamperMsg:   "Damper=1",
-			expectedStatus:     http.StatusOK,
+			expectedStatus:      http.StatusOK,
 		},
 		{
-			name:               "Over-temperature clamp (45.0°C -> 28.0°C)",
-			inputSetpoint:      floatPtr(45.0),
-			inputDamper:        intPtr(1),
+			name:                "Over-temperature clamp (45.0°C -> 28.0°C)",
+			inputSetpoint:       floatPtr(45.0),
+			inputDamper:         intPtr(1),
 			expectedSetpointMsg: "Setpoint=28.0°C",
 			expectedDamperMsg:   "Damper=1",
-			expectedStatus:     http.StatusOK,
+			expectedStatus:      http.StatusOK,
 		},
 		{
-			name:               "Negative damper clamp (-2 -> 0)",
-			inputSetpoint:      floatPtr(21.0),
-			inputDamper:        intPtr(-2),
+			name:                "Negative damper clamp (-2 -> 0)",
+			inputSetpoint:       floatPtr(21.0),
+			inputDamper:         intPtr(-2),
 			expectedSetpointMsg: "Setpoint=21.0°C",
 			expectedDamperMsg:   "Damper=0",
-			expectedStatus:     http.StatusOK,
+			expectedStatus:      http.StatusOK,
 		},
 		{
-			name:               "Excessive damper clamp (5 -> 3)",
-			inputSetpoint:      floatPtr(21.0),
-			inputDamper:        intPtr(5),
+			name:                "Excessive damper clamp (5 -> 3)",
+			inputSetpoint:       floatPtr(21.0),
+			inputDamper:         intPtr(5),
 			expectedSetpointMsg: "Setpoint=21.0°C",
 			expectedDamperMsg:   "Damper=3",
-			expectedStatus:     http.StatusOK,
+			expectedStatus:      http.StatusOK,
 		},
 	}
 
@@ -151,6 +151,31 @@ func TestActuatorController_MalformedJSON(t *testing.T) {
 	}
 }
 
+func TestActuatorController_UnknownRoomRejected(t *testing.T) {
+	ts := mockBuildSim()
+	defer ts.Close()
+	ctrl := &Controller{baseURL: ts.URL, httpClient: ts.Client()}
+
+	body, _ := json.Marshal(models.ActuatorCommand{Room: "B201", Setpoint: floatPtr(21.0)})
+	req := httptest.NewRequest(http.MethodPost, "/commands", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	ctrl.handleCommand(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected HTTP 400 for unknown room, got %d", w.Code)
+	}
+}
+
+func TestActuatorController_CORSPreflight(t *testing.T) {
+	ctrl := &Controller{baseURL: "http://127.0.0.1:9090", httpClient: &http.Client{Timeout: time.Second}}
+	req := httptest.NewRequest(http.MethodOptions, "/commands", nil)
+	w := httptest.NewRecorder()
+	withCORS(ctrl.handleCommand)(w, req)
+
+	if w.Code != http.StatusNoContent || w.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Errorf("Expected 204 with CORS headers, got %d %v", w.Code, w.Header())
+	}
+}
+
 func floatPtr(f float64) *float64 { return &f }
 func intPtr(i int) *int           { return &i }
-

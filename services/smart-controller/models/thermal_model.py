@@ -1,30 +1,39 @@
 """
-Model 02: Thermal Response & Dynamics Machine Learning Model
-Data-driven polynomial regression model trained on historical sensor telemetry
-and thermodynamic response curves. Predicts future temperature, CO2 dilution,
-and electrical power consumption for candidate HVAC actuation states.
-Adheres to D7065E Proposal Specifications (Weeks 6-7 Deliverable).
+Model 02: Thermal & IAQ Response Predictor
+Gradient-boosted regression trees on physics-informed features. Predicts the
+temperature change and CO2 change of Room A109 over a horizon step for a
+candidate (setpoint, damper) action, given the current state and occupancy.
+
+Training data:
+- Logged telemetry from the ingestor (/api/history), which stores the measured
+  temperature, CO2 and occupancy together with the live setpoint and damper.
+  State transitions are extracted at 10/30/60 s lags inside windows where the
+  actuators and occupancy were constant.
+- A synthetic corpus generated from the room physics (models/dynamics.py), used
+  to cover regimes that rarely occur in the logs (e.g. 300 s steps, extreme
+  setpoints). Its share is reported in the metrics.
+
+Electrical power is not learned: it is derived from the predicted trajectory by
+an energy balance (heater = dT/dt + losses - occupant gains).
 """
 
 import os
 import math
-import sqlite3
 import logging
 from datetime import datetime, timezone
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List, Optional
+
 import numpy as np
+import requests
+
+from models import dynamics as phys
 
 try:
-    from sklearn.linear_model import Ridge
-    from sklearn.preprocessing import PolynomialFeatures, StandardScaler
-    from sklearn.pipeline import Pipeline
+    from sklearn.ensemble import HistGradientBoostingRegressor
     from sklearn.metrics import mean_squared_error, r2_score
     import joblib
 except ImportError:
-    Ridge = None
-    PolynomialFeatures = None
-    StandardScaler = None
-    Pipeline = None
+    HistGradientBoostingRegressor = None
     mean_squared_error = None
     r2_score = None
     joblib = None
@@ -32,248 +41,214 @@ except ImportError:
 logger = logging.getLogger("ThermalPredictor")
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "thermal_model.joblib")
-DB_PATH = os.getenv("DB_PATH", "/data/db/hvac.db")
-if not os.path.exists(DB_PATH) and os.path.exists("data/db/hvac.db"):
-    DB_PATH = "data/db/hvac.db"
+MODEL_VERSION = 3
+SYNTHETIC_DTS = (10.0, 30.0, 60.0, 120.0, 300.0)
+TELEMETRY_LAGS = (10.0, 30.0, 60.0)
+HEATING_TIME_CONSTANT_S = 1.0 / phys.K_HVAC
+
+
+def fetch_training_telemetry(ingestor_url: str, room: str = "A109", minutes: int = 360) -> List[Dict[str, Any]]:
+    """Fetch logged telemetry (with actuator state) from the ingestor REST API."""
+    resp = requests.get(f"{ingestor_url}/api/history", params={"room": room, "minutes": minutes}, timeout=15)
+    resp.raise_for_status()
+    return resp.json() or []
+
 
 class ThermalPredictor:
-    def __init__(self, 
-                 ambient_temp: float = 12.0, 
-                 ambient_co2: float = 420.0,
-                 model_file: str = MODEL_PATH):
+    def __init__(self,
+                 ambient_temp: float = phys.AMBIENT_TEMP,
+                 ambient_co2: float = phys.AMBIENT_CO2,
+                 model_file: str = MODEL_PATH,
+                 telemetry_rows: Optional[List[Dict[str, Any]]] = None):
         self.ambient_temp = ambient_temp
         self.ambient_co2 = ambient_co2
         self.model_file = model_file
-        self.temp_pipeline = None
-        self.co2_pipeline = None
-        self.metrics = {"r2_score": 0.0, "rmse": 0.0, "samples": 0, "trained_at": None}
-        self.feature_names = [
-            "curr_temp",
-            "ambient_temp",
-            "setpoint",
-            "occupancy",
-            "damper",
-            "temp_lift",       # (setpoint - curr_temp)
-            "envelope_delta",   # (ambient_temp - curr_temp)
-            "dt_sec"
-        ]
-        self.load_or_train()
+        self.temp_model = None
+        self.co2_model = None
+        self.metrics: Dict[str, Any] = {"trained_at": None}
+        self.load_or_train(telemetry_rows)
 
-    def _extract_features(self, temp: float, setpoint: float, occupancy: int, damper: int, dt_sec: float) -> List[float]:
-        temp_lift = setpoint - temp
-        envelope_delta = self.ambient_temp - temp
-        return [temp, self.ambient_temp, setpoint, float(occupancy), float(damper), temp_lift, envelope_delta, dt_sec]
+    def features(self, temp, co2, setpoint, damper, occupancy, dt_sec) -> np.ndarray:
+        """Physics-informed feature matrix; every argument may be a scalar or an array."""
+        temp, co2, setpoint, damper, occupancy, dt_sec = np.broadcast_arrays(
+            np.asarray(temp, dtype=float), np.asarray(co2, dtype=float),
+            np.asarray(setpoint, dtype=float), np.asarray(damper, dtype=float),
+            np.asarray(occupancy, dtype=float), np.asarray(dt_sec, dtype=float))
+        envelope = temp - self.ambient_temp
+        excess_co2 = co2 - self.ambient_co2
+        return np.column_stack([
+            temp, co2, setpoint, damper, occupancy,
+            setpoint - temp,          # heating lift
+            envelope,                 # conductive loss driver
+            damper * envelope,        # ventilation heat loss driver
+            damper * excess_co2,      # ventilation CO2 removal driver
+            excess_co2,
+            dt_sec,
+        ])
 
-    def generate_synthetic_corpus(self, n_samples: int = 12000) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Generate a broad multi-condition operational corpus spanning all thermal regimes:
-        - Temperatures: 15.0°C to 28.0°C
-        - Setpoints: 16.0°C to 28.0°C
-        - Occupancy: 0 to 30 people
-        - Damper: 0 to 3
-        - Ambients: 5.0°C to 20.0°C
-        - dt: 10s to 300s
-        """
-        X = []
-        y_temp = []
-        y_co2 = []
+    def generate_synthetic_corpus(self, n_per_dt: int = 4000, seed: int = 42):
+        """Simulate random states forward with the room physics for each step length."""
+        rng = np.random.default_rng(seed)
+        X, y_t, y_c = [], [], []
+        for dt in SYNTHETIC_DTS:
+            t0 = rng.uniform(14.0, 28.0, n_per_dt)
+            c0 = rng.uniform(420.0, 1800.0, n_per_dt)
+            sp = rng.choice([16.0, 18.0, 19.0, 19.5, 20.0, 20.5, 21.0, 21.5, 22.0, 22.5, 23.0, 24.0, 26.0, 28.0], n_per_dt)
+            dmp = rng.integers(0, 4, n_per_dt).astype(float)
+            occ = rng.choice([0, 0, 0, 1, 2, 5, 8, 10, 12, 15, 20, 25], n_per_dt).astype(float)
+            t, c = t0.copy(), c0.copy()
+            for _ in range(int(dt)):
+                t, c, _ = phys.euler_tick(t, c, sp, dmp, occ, self.ambient_temp, self.ambient_co2)
+            t = t + rng.normal(0.0, 0.05, n_per_dt)      # sensor quantisation / noise
+            c = c + rng.normal(0.0, 2.0, n_per_dt)
+            X.append(self.features(t0, c0, sp, dmp, occ, dt))
+            y_t.append(t - t0)
+            y_c.append(c - c0)
+        return np.vstack(X), np.concatenate(y_t), np.concatenate(y_c)
 
-        np.random.seed(42)
-        for _ in range(n_samples):
-            t = np.random.uniform(16.0, 27.0)
-            c = np.random.uniform(420.0, 1600.0)
-            sp = np.random.choice([16.0, 18.0, 19.5, 20.5, 21.0, 22.0, 24.0, 26.0, 28.0])
-            dmp = np.random.choice([0, 1, 2, 3])
-            occ = np.random.choice([0, 0, 0, 1, 2, 5, 8, 12, 18, 25])
-            dt = np.random.choice([10.0, 30.0, 60.0, 120.0, 300.0])
+    def telemetry_corpus(self, rows: List[Dict[str, Any]]):
+        """Build (state, action) -> state transitions from logged telemetry."""
+        usable = [r for r in rows if r.get("setpoint") is not None and r.get("damper") is not None]
+        if len(usable) < 20:
+            return None
+        ts = np.array([datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00")).timestamp() for r in usable])
+        order = np.argsort(ts, kind="stable")
+        ts = ts[order]
+        temp = np.array([r["temperature"] for r in usable], dtype=float)[order]
+        co2 = np.array([r["co2"] for r in usable], dtype=float)[order]
+        occ = np.array([r["occupancy"] for r in usable], dtype=float)[order]
+        sp = np.array([r["setpoint"] for r in usable], dtype=float)[order]
+        dmp = np.array([r["damper"] for r in usable], dtype=float)[order]
 
-            # Analytical thermodynamic differential basis
-            rate_hvac = 0.04 * (sp - t)
-            rate_env = 0.005 * (self.ambient_temp - t)
-            rate_occ = 0.03 * float(occ)
-            delta_t = (rate_hvac + rate_env + rate_occ) * (dt / 5.0)
+        # Segment id increments whenever an input changes or the log has a gap.
+        changed = np.zeros(len(ts), dtype=bool)
+        changed[1:] = (np.diff(sp) != 0) | (np.diff(dmp) != 0) | (np.diff(occ) != 0) | (np.diff(ts) > 5.0)
+        segment = np.cumsum(changed)
 
-            # Add stochastic thermal noise (0.02°C variance)
-            noise_t = np.random.normal(0, 0.02)
-            new_t = t + delta_t + noise_t
+        X, y_t, y_c = [], [], []
+        for lag in TELEMETRY_LAGS:
+            j = np.searchsorted(ts, ts + lag)
+            valid = j < len(ts)
+            i_idx = np.nonzero(valid)[0]
+            j_idx = j[valid]
+            keep = (np.abs(ts[j_idx] - ts[i_idx] - lag) <= 1.0) & (segment[j_idx] == segment[i_idx])
+            i_idx, j_idx = i_idx[keep], j_idx[keep]
+            if len(i_idx) == 0:
+                continue
+            X.append(self.features(temp[i_idx], co2[i_idx], sp[i_idx], dmp[i_idx], occ[i_idx], ts[j_idx] - ts[i_idx]))
+            y_t.append(temp[j_idx] - temp[i_idx])
+            y_c.append(co2[j_idx] - co2[i_idx])
+        if not X:
+            return None
+        return np.vstack(X), np.concatenate(y_t), np.concatenate(y_c)
 
-            # CO2 mass balance basis
-            vent_rate = 0.01 + (0.02 * float(dmp))
-            d_co2_gen = 1.5 * float(occ) * (dt / 5.0)
-            d_co2_vent = vent_rate * (c - self.ambient_co2) * (dt / 5.0)
-            noise_c = np.random.normal(0, 2.0)
-            new_c = max(self.ambient_co2, c + (d_co2_gen - d_co2_vent) + noise_c)
-
-            features = self._extract_features(t, sp, occ, dmp, dt)
-            X.append(features)
-            y_temp.append(new_t - t) # Predict delta_T
-            y_co2.append(new_c - c)   # Predict delta_CO2
-
-        return np.array(X), np.array(y_temp), np.array(y_co2)
-
-    def train_from_telemetry_and_synthetic(self) -> Dict[str, Any]:
-        """
-        Train the polynomial Ridge regression model using logged database telemetry
-        supplemented with the multi-regime synthetic dataset.
-        """
-        if Ridge is None:
-            logger.warning("scikit-learn not available, using analytical forward equations.")
+    def train(self, telemetry_rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        if HistGradientBoostingRegressor is None:
+            logger.warning("scikit-learn not available, using the analytical physics model.")
             return self.metrics
 
-        logger.info("Training Model 02 (Polynomial Ridge Thermal Predictor)...")
-        X, y_temp, y_co2 = self.generate_synthetic_corpus(n_samples=15000)
+        rng = np.random.default_rng(7)
+        Xs, yts, ycs = self.generate_synthetic_corpus()
+        is_real = np.zeros(len(Xs), dtype=bool)
+        X, y_t, y_c = Xs, yts, ycs
 
-        # Attempt to inject actual historical telemetry observations if DB accessible
-        if os.path.exists(DB_PATH):
-            try:
-                conn = sqlite3.connect(DB_PATH)
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT temperature, co2, occupancy, power_w, timestamp 
-                    FROM telemetry 
-                    ORDER BY timestamp ASC 
-                    LIMIT 5000
-                """)
-                rows = cursor.fetchall()
-                conn.close()
+        real = self.telemetry_corpus(telemetry_rows) if telemetry_rows else None
+        n_real = 0
+        if real is not None:
+            Xr, ytr, ycr = real
+            n_real = len(Xr)
+            X = np.vstack([Xs, Xr])
+            y_t = np.concatenate([yts, ytr])
+            y_c = np.concatenate([ycs, ycr])
+            is_real = np.concatenate([is_real, np.ones(n_real, dtype=bool)])
 
-                if len(rows) > 10:
-                    real_X = []
-                    real_y_t = []
-                    real_y_c = []
-                    for i in range(len(rows) - 1):
-                        t0, c0, occ0, p0, _ = rows[i]
-                        t1, c1, _, _, _ = rows[i+1]
-                        dt = 2.0 # 2-second gateway interval
-                        # Back-calculate effective setpoint from power
-                        sp_eff = t0 + (p0 - 25.0 - 45.0) / 350.0 if p0 > 70.0 else t0
-                        dmp_eff = 1
-                        real_X.append(self._extract_features(t0, sp_eff, occ0, dmp_eff, dt))
-                        real_y_t.append(t1 - t0)
-                        real_y_c.append(c1 - c0)
+        idx = rng.permutation(len(X))
+        split = int(0.8 * len(X))
+        tr, te = idx[:split], idx[split:]
 
-                    X = np.vstack([X, np.array(real_X)])
-                    y_temp = np.concatenate([y_temp, np.array(real_y_t)])
-                    y_co2 = np.concatenate([y_co2, np.array(real_y_c)])
-                    logger.info(f"Incorporated {len(real_X)} historical observations from {DB_PATH}")
-            except Exception as e:
-                logger.warning(f"Could not load telemetry rows for training: {e}")
+        def make():
+            return HistGradientBoostingRegressor(max_iter=300, learning_rate=0.1, max_leaf_nodes=31, random_state=0)
 
-        # Train 80/20 train/test split
-        split_idx = int(len(X) * 0.8)
-        X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y_temp[:split_idx], y_temp[split_idx:]
+        temp_model = make().fit(X[tr], y_t[tr])
+        co2_model = make().fit(X[tr], y_c[tr])
+        pt, pc = temp_model.predict(X[te]), co2_model.predict(X[te])
 
-        # Polynomial Ridge pipeline for nonlinear bilinear thermal coupling
-        pipe = Pipeline([
-            ('scaler', StandardScaler()),
-            ('poly', PolynomialFeatures(degree=2, include_bias=False)),
-            ('ridge', Ridge(alpha=1.0))
-        ])
-        pipe.fit(X_train, y_train)
-
-        preds = pipe.predict(X_test)
-        r2 = float(r2_score(y_test, preds))
-        rmse = float(math.sqrt(mean_squared_error(y_test, preds)))
-
-        self.temp_pipeline = pipe
-
-        # Train companion CO2 pipeline
-        co2_pipe = Pipeline([
-            ('scaler', StandardScaler()),
-            ('poly', PolynomialFeatures(degree=2, include_bias=False)),
-            ('ridge', Ridge(alpha=1.0))
-        ])
-        co2_pipe.fit(X_train, y_co2[:split_idx])
-        self.co2_pipeline = co2_pipe
-
-        self.metrics = {
-            "algorithm": "Polynomial Ridge Regression (degree=2, alpha=1.0)",
-            "r2_score": round(r2, 4),
-            "rmse": round(rmse, 4),
-            "samples": len(X),
-            "trained_at": datetime.now(timezone.utc).isoformat()
+        metrics = {
+            "algorithm": "HistGradientBoostingRegressor x2 (dT, dCO2) on physics-informed features",
+            "samples_total": int(len(X)),
+            "samples_logged_telemetry": int(n_real),
+            "samples_synthetic": int(len(Xs)),
+            "test_r2_temp": round(float(r2_score(y_t[te], pt)), 4),
+            "test_rmse_temp_c": round(float(math.sqrt(mean_squared_error(y_t[te], pt))), 4),
+            "test_r2_co2": round(float(r2_score(y_c[te], pc)), 4),
+            "test_rmse_co2_ppm": round(float(math.sqrt(mean_squared_error(y_c[te], pc))), 2),
+            "trained_at": datetime.now(timezone.utc).isoformat(),
         }
+        real_te = te[is_real[te]]
+        if len(real_te) >= 20:
+            prt = temp_model.predict(X[real_te])
+            metrics["test_rmse_temp_c_logged_only"] = round(float(math.sqrt(mean_squared_error(y_t[real_te], prt))), 4)
+            metrics["test_samples_logged_only"] = int(len(real_te))
 
-        try:
-            joblib.dump({"temp": self.temp_pipeline, "co2": self.co2_pipeline, "metrics": self.metrics}, self.model_file)
-            logger.info(f"Model 02 trained successfully! R2: {r2:.4f}, RMSE: {rmse:.4f}. Saved to {self.model_file}")
-        except Exception as e:
-            logger.warning(f"Could not persist model file: {e}")
+        self.temp_model, self.co2_model, self.metrics = temp_model, co2_model, metrics
+        logger.info(f"Model 02 trained: {metrics}")
+        if joblib:
+            try:
+                joblib.dump({"version": MODEL_VERSION, "temp": temp_model, "co2": co2_model, "metrics": metrics}, self.model_file)
+            except Exception as e:
+                logger.warning(f"Could not persist model file: {e}")
+        return metrics
 
-        return self.metrics
-
-    def load_or_train(self):
-        """Load trained models from disk or fit fresh models."""
+    def load_or_train(self, telemetry_rows=None):
         if joblib and os.path.exists(self.model_file):
             try:
                 bundle = joblib.load(self.model_file)
-                self.temp_pipeline = bundle.get("temp")
-                self.co2_pipeline = bundle.get("co2")
-                self.metrics = bundle.get("metrics", self.metrics)
-                logger.info(f"Loaded existing Model 02 from {self.model_file}")
-                return
+                if bundle.get("version") == MODEL_VERSION:
+                    self.temp_model = bundle["temp"]
+                    self.co2_model = bundle["co2"]
+                    self.metrics = bundle.get("metrics", self.metrics)
+                    logger.info(f"Loaded existing Model 02 from {self.model_file}")
+                    return
+                logger.info("Model 02 file has an old feature version, retraining.")
             except Exception as e:
                 logger.warning(f"Failed to load {self.model_file}: {e}. Retraining...")
-        self.train_from_telemetry_and_synthetic()
+        self.train(telemetry_rows)
 
-    def predict_step(self, 
-                     temp: float, 
-                     co2: float, 
-                     setpoint: float, 
-                     damper: int, 
-                     occupancy: int, 
-                     dt_seconds: float = 60.0) -> Tuple[float, float, float]:
+    def predict_batch(self, temp, co2, setpoint, damper, occupancy, dt_seconds: float):
         """
-        Use the trained ML model to predict future room state over dt_seconds.
-        Returns: (predicted_temp, predicted_co2, instantaneous_power_watts)
+        Vectorised prediction for many candidate actions at once.
+        Returns arrays (next_temp, next_co2, average_power_w over the step).
         """
-        if self.temp_pipeline is not None and self.co2_pipeline is not None:
-            try:
-                features = np.array([self._extract_features(temp, setpoint, occupancy, damper, dt_seconds)])
-                delta_t = float(self.temp_pipeline.predict(features)[0])
-                delta_c = float(self.co2_pipeline.predict(features)[0])
+        temp = np.asarray(temp, dtype=float)
+        co2 = np.asarray(co2, dtype=float)
+        setpoint = np.asarray(setpoint, dtype=float)
+        damper = np.asarray(damper, dtype=float)
+        occupancy = np.asarray(occupancy, dtype=float)
+        shape = np.broadcast(temp, co2, setpoint, damper, occupancy).shape
 
-                predicted_temp = temp + delta_t
-                predicted_co2 = max(self.ambient_co2, co2 + delta_c)
-            except Exception as e:
-                logger.error(f"Prediction inference error: {e}. Falling back to physics equations.")
-                predicted_temp, predicted_co2 = self._analytical_step(temp, co2, setpoint, damper, occupancy, dt_seconds)
+        if self.temp_model is not None and self.co2_model is not None:
+            X = self.features(temp, co2, setpoint, damper, occupancy, dt_seconds)
+            next_t = np.broadcast_to(temp, shape) + self.temp_model.predict(X).reshape(shape)
+            next_c = np.maximum(self.ambient_co2, np.broadcast_to(co2, shape) + self.co2_model.predict(X).reshape(shape))
         else:
-            predicted_temp, predicted_co2 = self._analytical_step(temp, co2, setpoint, damper, occupancy, dt_seconds)
+            next_t, next_c = np.broadcast_to(temp, shape).copy(), np.broadcast_to(co2, shape).copy()
+            for _ in range(int(dt_seconds)):
+                next_t, next_c, _ = phys.euler_tick(next_t, next_c, setpoint, damper, occupancy, self.ambient_temp, self.ambient_co2)
 
-        # Calculate electrical power draw (Watts)
-        base_power = 25.0
-        fan_power = float(damper) * 45.0
-        temp_lift = setpoint - predicted_temp
-        heating_power = max(0.0, min(2500.0, temp_lift * 350.0))
-        power_w = base_power + fan_power + heating_power
+        # Energy balance over the step. The room approaches its new temperature with
+        # time constant ~1/K_HVAC, so the average temperature sits close to next_t.
+        settle = min(1.0, HEATING_TIME_CONSTANT_S / dt_seconds)
+        t_avg = next_t - (next_t - temp) * settle
+        loss = (phys.K_ENVELOPE + phys.K_VENT_THERMAL * damper) * (t_avg - self.ambient_temp)
+        gain = phys.K_OCC_HEAT * occupancy
+        heater = np.clip((next_t - temp) / dt_seconds + loss - gain, 0.0, phys.MAX_HEATER_RATE)
+        power = phys.BASE_W + phys.FAN_W_PER_LEVEL * damper + phys.W_PER_RATE * heater
+        return next_t, next_c, np.broadcast_to(power, shape)
 
-        return predicted_temp, predicted_co2, power_w
-
-    def _analytical_step(self, temp: float, co2: float, setpoint: float, damper: int, occupancy: int, dt: float) -> Tuple[float, float]:
-        rate_hvac = 0.04 * (setpoint - temp)
-        rate_env = 0.005 * (self.ambient_temp - temp)
-        rate_occ = 0.03 * float(occupancy)
-        d_t = (rate_hvac + rate_env + rate_occ) * (dt / 5.0)
-
-        vent_rate = 0.01 + (0.02 * float(damper))
-        d_co2_gen = 1.5 * float(occupancy) * (dt / 5.0)
-        d_co2_vent = vent_rate * (co2 - self.ambient_co2) * (dt / 5.0)
-
-        return temp + d_t, max(self.ambient_co2, co2 + (d_co2_gen - d_co2_vent))
+    def predict_step(self, temp: float, co2: float, setpoint: float, damper: int,
+                     occupancy: int, dt_seconds: float = 60.0) -> Tuple[float, float, float]:
+        t, c, p = self.predict_batch(temp, co2, setpoint, damper, occupancy, dt_seconds)
+        return float(t), float(c), float(p)
 
     def comfort_penalty(self, temp: float, co2: float) -> Tuple[float, float]:
-        """Calculate ASHRAE 55 and IAQ comfort penalties."""
-        temp_penalty = 0.0
-        if temp < 20.0:
-            temp_penalty = (20.0 - temp) ** 2
-        elif temp > 24.0:
-            temp_penalty = (temp - 24.0) ** 2
-
-        co2_penalty = 0.0
-        if co2 > 1000.0:
-            co2_penalty = ((co2 - 1000.0) / 100.0) ** 2
-
-        return temp_penalty, co2_penalty
-
+        return phys.BuildingDynamics().comfort_penalty(temp, co2)

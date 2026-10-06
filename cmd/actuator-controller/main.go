@@ -20,6 +20,7 @@ const (
 	listenPort     = ":8080"
 	minSetpoint    = 16.0
 	maxSetpoint    = 28.0
+	roomName       = "A109"
 )
 
 type Controller struct {
@@ -45,12 +46,26 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
-	http.HandleFunc("/commands", ctrl.handleCommand)
+	http.HandleFunc("/commands", withCORS(ctrl.handleCommand))
 
 	log.Printf("[ActuatorService] Listening for actuation commands on %s...", listenPort)
 	log.Printf("[ActuatorService] Target BuildSim URL: %s", baseURL)
 	if err := http.ListenAndServe(listenPort, nil); err != nil {
 		log.Fatalf("Server failed: %v", err)
+	}
+}
+
+// withCORS lets the browser dashboard (served on another port) post commands.
+func withCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
 	}
 }
 
@@ -66,6 +81,14 @@ func (c *Controller) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if cmd.Room != "" && cmd.Room != roomName {
+		http.Error(w, fmt.Sprintf("Unknown room %q: this guardrail controls %s only", cmd.Room, roomName), http.StatusBadRequest)
+		return
+	}
+	if cmd.Room == "" {
+		cmd.Room = roomName
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -75,7 +98,7 @@ func (c *Controller) handleCommand(w http.ResponseWriter, r *http.Request) {
 	if cmd.Setpoint != nil {
 		target := *cmd.Setpoint
 
-		// Simplex Safety Guardrail Clamp: 16.0 <= T <= 28.0
+		// Deterministic safety guardrail: clamp to 16.0 <= T <= 28.0
 		if target < minSetpoint {
 			log.Printf("[ActuatorService] Warning: Requested setpoint %.1f°C below safe limit. Clamping to %.1f°C.", target, minSetpoint)
 			target = minSetpoint
@@ -84,7 +107,7 @@ func (c *Controller) handleCommand(w http.ResponseWriter, r *http.Request) {
 			target = maxSetpoint
 		}
 
-		err := c.applyActuatorState("A109-setpoint", fmt.Sprintf("%.1f", target))
+		err := c.applyActuatorState(roomName+"-setpoint", fmt.Sprintf("%.1f", target))
 		if err != nil {
 			http.Error(w, fmt.Sprintf("BuildSim error: %v", err), http.StatusBadGateway)
 			return
@@ -101,7 +124,7 @@ func (c *Controller) handleCommand(w http.ResponseWriter, r *http.Request) {
 			damper = 3
 		}
 
-		err := c.applyActuatorState("A109-damper", fmt.Sprintf("%d", damper))
+		err := c.applyActuatorState(roomName+"-damper", fmt.Sprintf("%d", damper))
 		if err != nil {
 			http.Error(w, fmt.Sprintf("BuildSim error: %v", err), http.StatusBadGateway)
 			return

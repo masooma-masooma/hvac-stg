@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -19,7 +20,43 @@ const (
 	roomName       = "A109"
 	ambientTemp    = 12.0  // Outdoor temperature in Celsius
 	ambientCO2     = 420.0 // Ambient atmospheric CO2 in ppm
+
+	// Room physics, per 1-second tick. Must match services/smart-controller/models/dynamics.py.
+	kHVAC          = 0.04  // closed-loop response of the radiator thermostat (1/s)
+	kEnvelope      = 0.005 // conductive loss through the envelope (1/s)
+	kVentThermal   = 0.008 // heat carried out by ventilation air, per damper level (1/s; damper 3 ~ 175 L/s)
+	kOccHeat       = 0.01  // sensible heat per occupant (°C/s, ~90 W)
+	co2Gen         = 1.5   // CO2 generation per occupant (ppm/s)
+	ventCO2Base    = 0.01  // infiltration with damper closed (1/s)
+	ventCO2PerStep = 0.02  // extra air change per damper level (1/s)
+	maxHeaterRate  = 2500.0 / 8750.0
+	thermostatBand = 0.5 // °C above setpoint over which loss compensation fades out
 )
+
+// heaterRate is the heating delivered by the radiator thermostat (°C/s). It compensates
+// losses and occupant gains so the room settles at the setpoint, switches off above
+// the setpoint, and cannot cool.
+func heaterRate(temp, setpoint float64, damper, occupants int) float64 {
+	loss := (kEnvelope + kVentThermal*float64(damper)) * (temp - ambientTemp)
+	gain := kOccHeat * float64(occupants)
+	compensation := math.Max(0, math.Min(1, 1-(temp-setpoint)/thermostatBand))
+	demand := kHVAC*(setpoint-temp) + compensation*(loss-gain)
+	return math.Max(0, math.Min(demand, maxHeaterRate))
+}
+
+// stepRoom advances the room state by one 1-second tick.
+func stepRoom(temp, co2, setpoint float64, damper, occupants int) (float64, float64) {
+	loss := (kEnvelope + kVentThermal*float64(damper)) * (temp - ambientTemp)
+	gain := kOccHeat * float64(occupants)
+	temp += heaterRate(temp, setpoint, damper, occupants) - loss + gain
+
+	vent := ventCO2Base + ventCO2PerStep*float64(damper)
+	co2 += co2Gen*float64(occupants) - vent*(co2-ambientCO2)
+	if co2 < ambientCO2 {
+		co2 = ambientCO2
+	}
+	return temp, co2
+}
 
 type ActuatorState struct {
 	ID    string `json:"id"`
@@ -107,18 +144,7 @@ func main() {
 		occupantCount := readOccupancy(client, baseURL, roomKey)
 
 		// 3. Physical State Updates (Thermodynamic & IAQ Discrete ODE)
-		deltaHVAC := 0.04 * (setpoint - currentTemp)
-		deltaAmbient := 0.005 * (ambientTemp - currentTemp)
-		deltaOccHeat := 0.03 * float64(occupantCount)
-		currentTemp += deltaHVAC + deltaAmbient + deltaOccHeat
-
-		ventRate := 0.01 + (0.02 * float64(damperLevel))
-		deltaCO2Gen := 1.5 * float64(occupantCount)
-		deltaCO2Vent := ventRate * (currentCO2 - ambientCO2)
-		currentCO2 += deltaCO2Gen - deltaCO2Vent
-		if currentCO2 < ambientCO2 {
-			currentCO2 = ambientCO2
-		}
+		currentTemp, currentCO2 = stepRoom(currentTemp, currentCO2, setpoint, damperLevel, occupantCount)
 
 		// 4. Update BuildSim Sensors every 1 second
 		_ = writeSensor(client, baseURL, "A109-temp", fmt.Sprintf("%.1f", currentTemp))
